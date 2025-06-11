@@ -1,382 +1,525 @@
-# 🔍 Lost Objects Detection Service
+# 🔍 Service IA - Détection d'Objets Perdus
 
-**AI-powered real-time detection and tracking system for lost objects in public spaces**
+**Service intelligent de détection et surveillance d'objets perdus en temps réel**
 
-[![Python](https://img.shields.io/badge/Python-3.8%2B-blue)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.104%2B-green)](https://fastapi.tiangolo.com)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.1%2B-orange)](https://pytorch.org)
-[![Docker](https://img.shields.io/badge/Docker-Ready-blue)](https://docker.com)
+[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green.svg)](https://fastapi.tiangolo.com)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-red.svg)](https://pytorch.org)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## 🚀 **Overview**
+## 🎯 Vue d'ensemble
 
-The Lost Objects Detection Service is a comprehensive AI-powered system designed to automatically detect, track, and alert about potentially lost or abandoned objects in public spaces such as airports, train stations, and offices.
+Ce service utilise l'intelligence artificielle pour détecter et surveiller les objets perdus dans des espaces publics comme les aéroports, gares, centres commerciaux, etc. Il combine la détection d'objets en temps réel avec une logique métier intelligente pour identifier les objets abandonnés et générer des alertes automatiques.
 
-### ✨ **Key Features**
+### ✨ Fonctionnalités principales
 
-- 🤖 **AI-Powered Detection**: Advanced object detection using PyTorch and computer vision
-- 📡 **Real-time Streaming**: WebSocket-based live video processing
-- 🎬 **Video Analysis**: Batch processing of video files with timeline analysis
-- 📦 **Batch Processing**: Efficient bulk image processing
-- 🔄 **Temporal Tracking**: Intelligent object state management (Normal → Suspect → Lost)
-- 🌐 **RESTful API**: Comprehensive API with automatic documentation
-- 🐳 **Docker Ready**: Full containerization with GPU support
-- 📊 **Monitoring**: Built-in metrics and health checks
-- ⚡ **High Performance**: Optimized for production workloads
+- **🖼️ Détection sur images** : Analyse d'images statiques
+- **🎬 Traitement vidéo** : Analyse complète de fichiers vidéo
+- **📡 Streaming temps réel** : Détection en direct via WebSocket
+- **🧠 IA intelligente** : 28 classes d'objets avec logique d'objets perdus
+- **⚡ Performance optimisée** : Support GPU/CPU, cache intelligent
+- **🚨 Alertes automatiques** : Génération d'alertes contextuelles
+- **📊 Analytics** : Statistiques et tendances en temps réel
 
-## 🏗️ **Architecture**
+## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────┐
-│            FastAPI Application           │
-├─────────────────────────────────────────┤
-│  🌐 API Layer                           │
-│  ├── Image Detection                    │
-│  ├── Video Processing                   │
-│  ├── Batch Processing                   │
-│  └── WebSocket Streaming                │
-├─────────────────────────────────────────┤
-│  🧠 Business Logic                      │
-│  ├── Object Detector                    │
-│  ├── Model Manager                      │
-│  ├── Temporal Tracking                  │
-│  └── Lost Object Logic                  │
-├─────────────────────────────────────────┤
-│  🤖 AI Models                           │
-│  ├── MobileNet/EfficientNet Backbone    │
-│  ├── Feature Pyramid Network            │
-│  ├── Detection Heads                    │
-│  └── Multiple Model Support             │
-├─────────────────────────────────────────┤
-│  💾 Storage & Cache                     │
-│  ├── Model Storage                      │
-│  ├── Result Cache                       │
-│  └── Temporary Files                    │
-└─────────────────────────────────────────┘
+📁 ai-service/
+├── 📁 app/                          # 🎯 CŒUR DE L'APPLICATION
+│   ├── 📄 main.py                   # Point d'entrée FastAPI
+│   ├── 📁 api/                      # 🌐 COUCHE API
+│   │   ├── 📄 routes.py             # Routes principales
+│   │   └── 📁 endpoints/            # Endpoints spécialisés
+│   │       ├── 📄 image_detection.py    # 📸 Images statiques
+│   │       ├── 📄 video_detection.py    # 🎬 Vidéos
+│   │       ├── 📄 stream_detection.py   # 📡 Streaming temps réel
+│   │       └── 📄 models.py             # 🤖 Gestion modèles
+│   ├── 📁 core/                     # 🧠 LOGIQUE MÉTIER
+│   │   ├── 📄 detector.py           # Détecteur principal
+│   │   └── 📄 model_manager.py      # Gestionnaire modèles
+│   ├── 📁 utils/                    # 🔧 UTILITAIRES
+│   │   ├── 📄 image_utils.py        # Traitement images
+│   │   └── 📄 box_utils.py          # Manipulation bounding boxes
+│   ├── 📁 services/                 # 🎯 SERVICES MÉTIER
+│   │   └── 📄 stream_service.py     # Service streaming
+│   ├── 📁 schemas/                  # 📋 SCHÉMAS PYDANTIC
+│   │   └── 📄 detection.py          # Schémas détection
+│   └── 📁 config/                   # ⚙️ CONFIGURATION
+│       └── 📄 config.py             # Configuration générale
+├── 📁 storage/                      # 💾 STOCKAGE
+│   ├── 📁 models/                   # 🏆 MODÈLES ENTRAÎNÉS
+│   ├── 📁 temp/                     # Temporaire
+│   └── 📁 cache/                    # Cache modèles
+├── 📁 tests/                        # 🧪 TESTS
+├── 📁 scripts/                      # 📜 SCRIPTS UTILITAIRES
+└── 📁 logs/                         # 📋 LOGS
 ```
 
-## 📋 **Quick Start**
+## 🚀 Installation Rapide
 
-### **Prerequisites**
-
+### Prérequis
 - Python 3.8+
-- Docker & Docker Compose (recommended)
-- CUDA-compatible GPU (optional, for acceleration)
+- 4GB RAM minimum (8GB recommandé)
+- GPU NVIDIA optionnel (pour de meilleures performances)
 
-### **🐳 Docker Deployment (Recommended)**
-
-1. **Clone the repository**
-   ```bash
-   git clone <repository-url>
-   cd lost-objects-detection
-   ```
-
-2. **Configure environment**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your settings
-   ```
-
-3. **Start services**
-   ```bash
-   # CPU-only deployment
-   docker-compose up -d
-   
-   # GPU-enabled deployment
-   docker-compose --profile gpu up -d
-   
-   # With monitoring
-   docker-compose --profile monitoring up -d
-   ```
-
-4. **Verify deployment**
-   ```bash
-   curl http://localhost:8000/health
-   ```
-
-### **🐍 Local Development**
-
-1. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. **Download models** (place in `storage/models/`)
-   ```bash
-   python scripts/cache_manager.py download stable_model_epoch_30 <MODEL_URL>
-   ```
-
-3. **Start development server**
-   ```bash
-   uvicorn app.main:app --reload
-   ```
-
-## 📚 **API Usage**
-
-### **🖼️ Image Detection**
+### 1. Clone et Installation
 
 ```bash
-curl -X POST "http://localhost:8000/api/v1/detect/image" \
-     -H "Content-Type: multipart/form-data" \
-     -F "file=@image.jpg"
+# Clone du projet
+git clone <your-repo-url>
+cd ai-service
+
+# Installation automatique
+python scripts/start_service.py --install
 ```
 
-### **🎬 Video Processing**
+### 2. Méthode Manuelle
 
 ```bash
-# Start video processing job
-curl -X POST "http://localhost:8000/api/v1/detect/video/upload" \
-     -F "file=@video.mp4"
+# Installation des dépendances
+pip install -r requirements.txt
 
-# Check job status
-curl "http://localhost:8000/api/v1/detect/video/job/{job_id}/status"
+# Création des répertoires
+mkdir -p storage/{models,temp,cache} logs
+
+# Configuration
+cp .env.example .env  # Puis éditez selon vos besoins
+
+# Démarrage
+uvicorn app.main:app --reload
 ```
 
-### **📦 Batch Processing**
+### 3. Docker (Recommandé)
 
 ```bash
-# Upload multiple images
-curl -X POST "http://localhost:8000/api/v1/detect/batch/upload" \
-     -F "files=@image1.jpg" \
-     -F "files=@image2.jpg" \
-     -F "files=@image3.jpg"
+# Build et démarrage
+docker-compose up -d
+
+# Ou avec monitoring
+docker-compose --profile monitoring up -d
 ```
 
-### **📡 WebSocket Streaming**
+## 🎮 Utilisation
 
-```javascript
-const ws = new WebSocket('ws://localhost:8000/ws/stream/client_123');
+### 📱 Interface Web
 
-// Send image frame
-ws.send(imageBlob);
+Une fois le service démarré, accédez à :
 
-// Receive detection results
-ws.onmessage = (event) => {
-    const result = JSON.parse(event.data);
-    console.log('Detection result:', result);
-};
-```
+- **API Documentation** : http://localhost:8000/docs
+- **Interface Streaming** : http://localhost:8000/api/v1/stream/demo
+- **Status Santé** : http://localhost:8000/health
 
-## 🔧 **Configuration**
-
-### **Environment Variables**
-
-```bash
-# Service Configuration
-API_PORT=8000
-LOG_LEVEL=info
-ENVIRONMENT=production
-
-# Model Configuration
-MODELS_DIR=./storage/models
-DEFAULT_MODEL=stable_model_epoch_30
-CONFIDENCE_THRESHOLD=0.3
-
-# Database Configuration
-POSTGRES_PASSWORD=your_secure_password
-REDIS_PORT=6379
-
-# GPU Configuration
-CUDA_VISIBLE_DEVICES=0
-```
-
-### **Model Configuration**
-
-Models are configured in `app/config/model_config.py`:
+### 🖼️ Détection d'Images
 
 ```python
-# Available model variants
-MODEL_VARIANTS = {
-    'production': 'Balanced model for production use',
-    'lightweight': 'Fast model for edge deployment',
-    'high_accuracy': 'High precision for critical applications',
-    'streaming': 'Optimized for real-time processing'
+import requests
+
+# Upload d'un fichier
+with open('image.jpg', 'rb') as f:
+    response = requests.post(
+        'http://localhost:8000/api/v1/detect/image',
+        files={'file': f},
+        data={
+            'model_name': 'stable_epoch_30',
+            'confidence_threshold': 0.5,
+            'enable_lost_detection': True
+        }
+    )
+
+result = response.json()
+print(f"Objets détectés: {result['total_objects']}")
+print(f"Objets perdus: {result['lost_objects']}")
+```
+
+### 🎬 Traitement Vidéo
+
+```python
+# Lancement du traitement
+response = requests.post(
+    'http://localhost:8000/api/v1/detect/video',
+    files={'file': open('video.mp4', 'rb')},
+    data={'frame_skip': 5, 'max_frames': 1000}
+)
+
+task_id = response.json()['task_id']
+
+# Suivi du progrès
+status_response = requests.get(
+    f'http://localhost:8000/api/v1/detect/video/status/{task_id}'
+)
+
+print(f"Progrès: {status_response.json()['progress']}%")
+```
+
+### 📡 Streaming Temps Réel
+
+```python
+import asyncio
+import websockets
+import json
+import base64
+import cv2
+
+async def stream_webcam():
+    uri = "ws://localhost:8000/api/v1/stream/ws/client_123"
+    
+    async with websockets.connect(uri) as websocket:
+        cap = cv2.VideoCapture(0)
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            # Encodage base64
+            _, buffer = cv2.imencode('.jpg', frame)
+            frame_b64 = base64.b64encode(buffer).decode()
+            
+            # Envoi au serveur
+            message = {
+                "type": "frame",
+                "data": frame_b64,
+                "config": {"confidence_threshold": 0.5}
+            }
+            
+            await websocket.send(json.dumps(message))
+            
+            # Réception résultat
+            response = await websocket.recv()
+            result = json.loads(response)
+            
+            if result['type'] == 'detection':
+                objects = result['result']['total_objects']
+                lost = result['result']['lost_objects']
+                print(f"🔍 {objects} objets, {lost} perdus")
+            
+            elif result['type'] == 'alert':
+                print(f"🚨 ALERTE: {result['alert']['message']}")
+
+# Exécution
+asyncio.run(stream_webcam())
+```
+
+## 🤖 Gestion des Modèles
+
+### Modèles Supportés
+
+Le service supporte plusieurs modèles optimisés pour différents cas d'usage :
+
+| Modèle | Description | Performance | Vitesse | Usage |
+|--------|-------------|-------------|---------|--------|
+| `stable_epoch_30` | **Champion** - Modèle principal | 🟢 Haute | 🟡 Moyenne | Détection générale |
+| `extended_28_classes` | Modèle étendu 28 classes | 🟢 Très haute | 🟡 Moyenne | Classification détaillée |
+| `fast_stream` | Optimisé temps réel | 🟡 Moyenne | 🟢 Très rapide | Streaming |
+
+### Ajout de Vos Modèles
+
+1. **Placez vos fichiers `.pth`** dans `storage/models/`
+2. **Modifiez la configuration** dans `app/config/config.py`
+3. **Redémarrez le service**
+
+```python
+# Exemple d'ajout dans config.py
+MODEL_CONFIGS = {
+    'mon_modele': {
+        'file': 'mon_modele.pth',
+        'description': 'Mon modèle personnalisé',
+        'performance': 'high',
+        'speed': 'fast'
+    }
 }
 ```
 
-## 🤖 **Models**
+## 📊 Logique Métier - Objets Perdus
 
-### **Supported Models**
+### États d'un Objet
 
-| Model | Description | Performance | Use Case |
-|-------|-------------|-------------|----------|
-| **Epoch 30** | Production model | F1=49.86%, ~100ms | General detection |
-| **Extended** | 28-class model | High precision | Detailed classification |
-| **Fast Stream** | Real-time optimized | ~30ms | Live streaming |
-| **Mobile** | Edge deployment | Lightweight | Mobile/IoT devices |
+```mermaid
+graph LR
+    A[🟢 Normal] --> B[🟡 Surveillance]
+    B --> C[🟠 Suspect]
+    C --> D[🔴 Perdu]
+    D --> E[🔴 Critique]
+    D --> F[✅ Résolu]
+    C --> F
+```
 
-### **Model Management**
+| État | Conditions | Durée | Actions |
+|------|------------|-------|---------|
+| **🟢 Normal** | Propriétaire présent | - | Surveillance passive |
+| **🟡 Surveillance** | Immobile 30s | 30s | Surveillance renforcée |
+| **🟠 Suspect** | Pas de propriétaire 30s | 30s-5min | Alerte préventive |
+| **🔴 Perdu** | Abandonné > 5min | 5-30min | Alerte sécurité |
+| **🔴 Critique** | Abandonné > 30min | 30min+ | Intervention prioritaire |
+
+### Paramètres Configurables
 
 ```bash
-# List available models
-python scripts/cache_manager.py list
-
-# Download new model
-python scripts/cache_manager.py download model_name URL
-
-# Verify model integrity
-python scripts/cache_manager.py verify
-
-# Backup models
-python scripts/cache_manager.py backup models_backup.zip
+# .env
+SUSPECT_THRESHOLD_SECONDS=30      # Temps avant suspect
+LOST_THRESHOLD_SECONDS=300        # Temps avant perdu (5min)
+CRITICAL_THRESHOLD_SECONDS=1800   # Temps avant critique (30min)
+OWNER_PROXIMITY_METERS=2.5        # Distance propriétaire (mètres)
 ```
 
-## 📊 **Monitoring & Analytics**
+## 🛠️ Configuration Avancée
 
-### **Health Checks**
-
-- **Service Health**: `GET /health`
-- **Model Status**: `GET /api/v1/models`
-- **System Stats**: `GET /stats`
-
-### **Metrics Dashboard**
-
-Access Grafana dashboard at `http://localhost:3000` (when monitoring profile is enabled)
-
-Default credentials: `admin/admin`
-
-### **Logs**
+### Variables d'Environnement
 
 ```bash
-# View service logs
-docker-compose logs -f lost-objects-api
+# Performance
+USE_GPU=True                    # Utiliser GPU si disponible
+BATCH_SIZE=4                   # Taille batch traitement
+MAX_MEMORY_USAGE=0.8           # Limite mémoire GPU
 
-# View specific service logs
-docker-compose logs -f nginx redis postgres
+# Streaming
+MAX_CONNECTIONS=10             # Connexions WebSocket max
+STREAM_FPS=15                  # FPS streaming
+BUFFER_SIZE=30                 # Taille buffer frames
+
+# Cache
+CACHE_TTL=3600                 # TTL cache (secondes)
+MAX_CACHE_SIZE=100             # Taille max cache
+
+# Sécurité (production)
+SECRET_KEY=your-secret-key
+ACCESS_TOKEN_EXPIRE_MINUTES=30
 ```
 
-## 🧪 **Testing**
+### Configuration Modèles
 
-### **Run Test Suite**
+```python
+# app/config/config.py
+MODEL_CONFIG = {
+    'num_classes': 28,
+    'image_size': (320, 320),
+    'confidence_threshold': 0.5,
+    'nms_threshold': 0.5,
+    'classes': [
+        'person', 'backpack', 'suitcase', 'handbag', 'tie',
+        'umbrella', 'hair drier', 'toothbrush', 'cell phone',
+        'laptop', 'keyboard', 'mouse', 'remote', 'tv',
+        'clock', 'microwave', 'bottle', 'cup', 'bowl',
+        'knife', 'spoon', 'fork', 'wine glass', 'refrigerator',
+        'scissors', 'book', 'vase', 'chair'
+    ]
+}
+```
+
+## 📈 Monitoring et Analytics
+
+### Métriques Disponibles
+
+- **Performance** : Temps de traitement, FPS, usage mémoire
+- **Détections** : Nombre d'objets, types, confiance
+- **Alertes** : Fréquence, types, résolutions
+- **Système** : Charge CPU/GPU, connexions actives
+
+### Endpoints de Monitoring
 
 ```bash
-# Basic functionality tests
-python scripts/test_service.py --quick
-
-# Comprehensive test suite
-python scripts/test_service.py
-
-# Unit tests
-pytest tests/
+GET /health              # Santé système
+GET /stats               # Statistiques globales
+GET /api/v1/models/health # Santé modèles
+GET /api/v1/stream/status # État streaming
 ```
 
-### **Performance Benchmarking**
+### Intégration Prometheus
+
+```yaml
+# docker-compose.yml
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    profiles:
+      - monitoring
+```
+
+## 🧪 Tests
+
+### Exécution des Tests
 
 ```bash
-# Benchmark detection speed
-python scripts/test_service.py --url http://localhost:8000
+# Tests complets
+python -m pytest tests/ -v
+
+# Tests spécifiques
+python -m pytest tests/test_api.py -v
+
+# Tests avec couverture
+pip install pytest-cov
+python -m pytest tests/ --cov=app --cov-report=html
 ```
 
-## 🚀 **Deployment**
-
-### **Production Deployment**
+### Tests d'Intégration
 
 ```bash
-# Deploy with all optimizations
-python scripts/deploy.py deploy --config config/production.json
+# Démarrer le service de test
+python scripts/start_service.py --port 8001 &
 
-# Monitor deployment
-python scripts/deploy.py status
+# Exécuter les tests d'intégration
+python tests/integration_tests.py
 
-# Scale services
-docker-compose up -d --scale lost-objects-api=3
+# Arrêter le service de test
+pkill -f "uvicorn.*8001"
 ```
 
-### **Environment-Specific Configurations**
+## 🚀 Déploiement Production
 
-- **Airport**: Extended monitoring, 10-minute thresholds
-- **Train Station**: High-traffic optimizations
-- **Office**: Longer thresholds, work-hours only
-- **Public Space**: Weather-dependent adjustments
-
-## 🛠️ **Development**
-
-### **Project Structure**
-
-```
-lost-objects-detection/
-├── app/                     # Main application
-│   ├── api/                 # API endpoints
-│   ├── core/                # Business logic
-│   ├── models/              # AI model definitions
-│   ├── services/            # Service layer
-│   ├── utils/               # Utilities
-│   ├── config/              # Configuration
-│   └── schemas/             # Pydantic schemas
-├── storage/                 # Data storage
-│   ├── models/              # Trained models
-│   ├── cache/               # Cache files
-│   └── temp/                # Temporary files
-├── scripts/                 # Utility scripts
-├── tests/                   # Test suite
-├── config/                  # Configuration files
-├── docs/                    # Documentation
-└── docker-compose.yml       # Container orchestration
-```
-
-### **Contributing**
-
-1. Fork the repository
-2. Create feature branch: `git checkout -b feature/amazing-feature`
-3. Commit changes: `git commit -m 'Add amazing feature'`
-4. Push to branch: `git push origin feature/amazing-feature`
-5. Open Pull Request
-
-### **Code Style**
+### Docker Production
 
 ```bash
-# Format code
-black app/ tests/ scripts/
+# Build image de production
+docker build -t ai-service:prod .
 
-# Lint code
-flake8 app/ tests/ scripts/
-
-# Type checking
-mypy app/
+# Déploiement avec monitoring
+docker-compose --profile production --profile monitoring up -d
 ```
 
-## 📈 **Performance Optimization**
+### Configuration Production
 
-### **GPU Acceleration**
+```bash
+# .env.production
+DEBUG=False
+USE_GPU=True
+WORKERS=4
+LOG_LEVEL=WARNING
 
-- CUDA 11.8+ support
-- Multi-GPU deployment
-- Mixed precision training
-- TensorRT optimization (optional)
+# Sécurité
+SECRET_KEY=your-production-secret
+CORS_ORIGINS=["https://yourapp.com"]
 
-### **Scaling Options**
+# Base de données
+DATABASE_URL=postgresql://user:pass@db:5432/ai_service
 
-- Horizontal scaling with load balancer
-- Model caching and optimization
-- Async processing pipelines
-- Resource-based auto-scaling
+# Cache Redis
+REDIS_URL=redis://redis:6379
+```
 
-## 🔒 **Security**
+### Nginx Reverse Proxy
 
-- Non-root container execution
-- Environment-based secrets
-- API rate limiting
-- Input validation and sanitization
-- SSL/TLS support
+```nginx
+# nginx/nginx.conf
+upstream ai_service {
+    server ai-service:8000;
+}
 
-## 📞 **Support**
+server {
+    listen 80;
+    server_name your-domain.com;
+    
+    location / {
+        proxy_pass http://ai_service;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+    
+    location /ws/ {
+        proxy_pass http://ai_service;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
 
-- **Documentation**: [docs/](docs/)
-- **API Reference**: `http://localhost:8000/docs`
-- **Issues**: GitHub Issues
-- **Discussions**: GitHub Discussions
+## 🐛 Dépannage
 
-## 📄 **License**
+### Problèmes Courants
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+**❌ Modèles non trouvés**
+```bash
+# Solution
+mkdir -p storage/models
+# Placez vos fichiers .pth dans ce répertoire
+```
 
-## 🙏 **Acknowledgments**
+**❌ Erreur CUDA**
+```bash
+# Vérifiez GPU
+python -c "import torch; print(torch.cuda.is_available())"
 
-- PyTorch team for the deep learning framework
-- FastAPI team for the modern web framework
-- OpenCV community for computer vision tools
-- Contributors and beta testers
+# Forcer CPU
+export USE_GPU=False
+```
+
+**❌ Port déjà utilisé**
+```bash
+# Changer le port
+python scripts/start_service.py --port 8001
+```
+
+**❌ Mémoire insuffisante**
+```bash
+# Réduire batch size
+export BATCH_SIZE=1
+export MAX_CONNECTIONS=5
+```
+
+### Logs de Debug
+
+```bash
+# Logs détaillés
+export LOG_LEVEL=DEBUG
+python scripts/start_service.py
+
+# Logs dans fichier
+tail -f logs/ai_service.log
+```
+
+## 🤝 Contribution
+
+### Structure des Commits
+
+```bash
+feat: nouvelle fonctionnalité
+fix: correction de bug
+docs: documentation
+style: formatage code
+refactor: refactoring
+test: ajout tests
+chore: maintenance
+```
+
+### Développement
+
+```bash
+# Setup environnement dev
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+# ou venv\Scripts\activate  # Windows
+
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
+
+# Pre-commit hooks
+pre-commit install
+
+# Tests avant commit
+python -m pytest tests/
+python -m black app/
+python -m flake8 app/
+```
+
+## 📄 Licence
+
+Ce projet est sous licence MIT. Voir le fichier [LICENSE](LICENSE) pour plus de détails.
+
+## 🆘 Support
+
+- **📧 Email** : support@yourcompany.com
+- **💬 Discord** : [Serveur Discord](https://discord.gg/yourserver)
+- **📖 Documentation** : [Wiki](https://github.com/yourrepo/wiki)
+- **🐛 Issues** : [GitHub Issues](https://github.com/yourrepo/issues)
+
+## 🔄 Versions
+
+- **v1.0.0** - Version initiale avec détection d'images et streaming
+- **v1.1.0** - Ajout traitement vidéo et analytics
+- **v1.2.0** - Optimisations performance et monitoring
 
 ---
 
-**🚀 Ready to detect lost objects? Get started with the [Quick Start](#-quick-start) guide!**
+**🎯 Fait avec ❤️ pour la sécurité et l'innovation**

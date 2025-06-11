@@ -1,323 +1,153 @@
-"""
-⚙️ CONFIG - CONFIGURATION GÉNÉRALE DU SERVICE IA
-==============================================
-Configuration centralisée pour le service de détection d'objets perdus
-
-Fonctionnalités:
-- Configuration par environnement (dev/prod/test)
-- Variables d'environnement avec valeurs par défaut
-- Validation des paramètres
-- Configuration des modèles et seuils
-- Paramètres de performance et optimisation
-"""
-
+# app/config/config.py
 import os
-from typing import List, Dict, Any, Optional
 from pathlib import Path
+from typing import Dict, List, Optional
 from pydantic_settings import BaseSettings
-from pydantic import Field, validator
-from enum import Enum
-
-class Environment(str, Enum):
-    """🌍 Environnements supportés"""
-    DEVELOPMENT = "development"
-    PRODUCTION = "production"
-    TESTING = "testing"
-
-class LogLevel(str, Enum):
-    """📝 Niveaux de log"""
-    DEBUG = "DEBUG"
-    INFO = "INFO"
-    WARNING = "WARNING"
-    ERROR = "ERROR"
 
 class Settings(BaseSettings):
-    """⚙️ Configuration principale du service"""
+    """Configuration du service IA"""
     
-    # === INFORMATIONS SERVICE ===
-    SERVICE_NAME: str = "AI Detection Service"
-    VERSION: str = "1.0.0"
-    DESCRIPTION: str = "Service IA pour détection d'objets perdus"
-    
-    # === ENVIRONNEMENT ===
-    ENVIRONMENT: Environment = Environment.DEVELOPMENT
-    DEBUG: bool = False
-    LOG_LEVEL: LogLevel = LogLevel.INFO
-    
-    # === SERVEUR ===
+    # === CONFIGURATION SERVEUR ===
     HOST: str = "0.0.0.0"
-    PORT: int = 8001
-    WORKERS: int = 4
-    RELOAD: bool = False
+    PORT: int = 8000
+    DEBUG: bool = True
+    WORKERS: int = 1
     
-    # === BASE DE DONNÉES ===
-    DATABASE_URL: str = "postgresql+asyncpg://aiuser:password@localhost:5432/ai_detection"
-    REDIS_URL: str = "redis://localhost:6379/0"
+    # === CHEMINS ===
+    BASE_DIR: Path = Path(__file__).parent.parent.parent
+    STORAGE_DIR: Path = BASE_DIR / "storage"
+    MODELS_DIR: Path = STORAGE_DIR / "models"
+    TEMP_DIR: Path = STORAGE_DIR / "temp"
+    CACHE_DIR: Path = STORAGE_DIR / "cache"
     
-    # === SERVICES EXTERNES ===
-    BACKEND_URL: str = "http://localhost:8080"
-    FRONTEND_URL: str = "http://localhost:3000"
+    # === CONFIGURATION MODÈLES ===
+    DEFAULT_MODEL: str = "stable_model_epoch_30.pth"
+    EXTENDED_MODEL: str = "best_extended_model.pth"
+    FAST_MODEL: str = "fast_stream_model.pth"
     
-    # === CHEMINS ET STOCKAGE ===
-    BASE_DIR: Path = Field(default_factory=lambda: Path(__file__).parent.parent.parent)
-    STORAGE_DIR: Path = Field(default_factory=lambda: Path("storage"))
-    MODELS_DIR: Path = Field(default_factory=lambda: Path("storage/models"))
-    TEMP_DIR: Path = Field(default_factory=lambda: Path("storage/temp"))
-    CACHE_DIR: Path = Field(default_factory=lambda: Path("storage/cache"))
-    LOGS_DIR: Path = Field(default_factory=lambda: Path("storage/logs"))
+    # === PARAMÈTRES DÉTECTION ===
+    CONFIDENCE_THRESHOLD: float = 0.5
+    NMS_THRESHOLD: float = 0.5
+    MAX_DETECTIONS: int = 50
+    IMAGE_SIZE: tuple = (320, 320)
     
-    # === CONFIGURATION IA ===
-    DEVICE: str = "auto"  # auto, cpu, cuda, mps
-    BATCH_SIZE: int = 8
-    MAX_IMAGE_SIZE: int = 1920
-    ENABLE_GPU: bool = True
-    HALF_PRECISION: bool = False
+    # === STREAMING ===
+    MAX_CONNECTIONS: int = 10
+    STREAM_FPS: int = 15
+    BUFFER_SIZE: int = 30
     
-    # === MODÈLES DISPONIBLES ===
-    AVAILABLE_MODELS: List[str] = [
-        "epoch_30",
-        "extended", 
-        "fast",
-        "mobile"
-    ]
-    DEFAULT_MODEL: str = "epoch_30"
+    # === OBJETS PERDUS - LOGIQUE MÉTIER ===
+    SUSPECT_THRESHOLD_SECONDS: int = 30
+    LOST_THRESHOLD_SECONDS: int = 300  # 5 minutes
+    CRITICAL_THRESHOLD_SECONDS: int = 1800  # 30 minutes
+    OWNER_PROXIMITY_METERS: float = 2.5
     
-    # === CLASSES D'OBJETS DÉTECTABLES ===
-    DETECTION_CLASSES: List[str] = [
+    # === PERFORMANCE ===
+    USE_GPU: bool = False  # Désactivé par défaut pour éviter les problèmes
+    BATCH_SIZE: int = 4
+    NUM_WORKERS: int = 0
+    MAX_MEMORY_USAGE: float = 0.8
+    
+    # === CACHE ===
+    CACHE_TTL: int = 3600
+    MAX_CACHE_SIZE: int = 100
+    
+    class Config:
+        env_file = ".env"
+
+# Instance globale des paramètres
+settings = Settings()
+
+# Configuration des modèles simplifiée
+MODEL_CONFIG = {
+    'num_classes': 28,
+    'image_size': (320, 320),
+    'confidence_threshold': 0.5,
+    'nms_threshold': 0.5,
+    'max_detections': 50,
+    
+    'classes': [
         'person', 'backpack', 'suitcase', 'handbag', 'tie',
         'umbrella', 'hair drier', 'toothbrush', 'cell phone',
         'laptop', 'keyboard', 'mouse', 'remote', 'tv',
         'clock', 'microwave', 'bottle', 'cup', 'bowl',
         'knife', 'spoon', 'fork', 'wine glass', 'refrigerator',
         'scissors', 'book', 'vase', 'chair'
+    ],
+    
+    'class_names_fr': {
+        'person': 'Personne',
+        'backpack': 'Sac à dos',
+        'suitcase': 'Valise',
+        'handbag': 'Sac à main',
+        'tie': 'Cravate',
+        'hair drier': 'Sèche-cheveux',
+        'toothbrush': 'Brosse à dents',
+        'cell phone': 'Téléphone',
+        'laptop': 'Ordinateur portable',
+        'keyboard': 'Clavier',
+        'mouse': 'Souris',
+        'remote': 'Télécommande',
+        'tv': 'Télévision',
+        'bottle': 'Bouteille',
+        'cup': 'Tasse',
+        'bowl': 'Bol',
+        'knife': 'Couteau',
+        'spoon': 'Cuillère',
+        'fork': 'Fourchette',
+        'wine glass': 'Verre',
+        'scissors': 'Ciseaux',
+        'book': 'Livre',
+        'clock': 'Horloge',
+        'umbrella': 'Parapluie',
+        'vase': 'Vase',
+        'chair': 'Chaise',
+        'microwave': 'Micro-ondes',
+        'refrigerator': 'Réfrigérateur'
+    }
+}
+
+# Configuration simplifiée des objets perdus
+LOST_OBJECT_CONFIG = {
+    'temporal_thresholds': {
+        'surveillance': 30,
+        'alert': 300,
+        'critical': 1800,
+        'escalation': 3600
+    },
+    
+    'spatial_thresholds': {
+        'owner_proximity': 2.5,
+        'movement_threshold': 0.5,
+        'zone_boundary': 10.0
+    },
+    
+    'confidence_thresholds': {
+        'object_detection': 0.5,
+        'tracking_stability': 0.8,
+        'person_association': 0.6
+    },
+    
+    'blacklist_objects': [
+        'chair', 'tv', 'refrigerator', 'microwave'
+    ],
+    
+    'priority_objects': [
+        'backpack', 'suitcase', 'handbag', 'laptop', 'cell phone'
+    ]
+}
+
+def ensure_directories():
+    """Crée les répertoires nécessaires"""
+    directories = [
+        settings.STORAGE_DIR,
+        settings.MODELS_DIR,
+        settings.TEMP_DIR,
+        settings.CACHE_DIR,
     ]
     
-    # === NOMS EN FRANÇAIS ===
-    CLASSES_FR_NAMES: List[str] = [
-        'Personne', 'Sac à dos', 'Valise', 'Sac à main', 'Cravate',
-        'Parapluie', 'Sèche-cheveux', 'Brosse à dents', 'Téléphone',
-        'Ordinateur portable', 'Clavier', 'Souris', 'Télécommande', 'Télévision',
-        'Horloge', 'Micro-ondes', 'Bouteille', 'Tasse', 'Bol',
-        'Couteau', 'Cuillère', 'Fourchette', 'Verre', 'Réfrigérateur',
-        'Ciseaux', 'Livre', 'Vase', 'Chaise'
-    ]
-    
-    # === PARAMÈTRES DE DÉTECTION ===
-    DEFAULT_CONFIDENCE_THRESHOLD: float = 0.5
-    DEFAULT_NMS_THRESHOLD: float = 0.4
-    MAX_DETECTIONS_PER_IMAGE: int = 100
-    MIN_BOX_AREA: int = 25
-    
-    # === PARAMÈTRES OBJETS PERDUS ===
-    # Seuils temporels (en secondes)
-    SUSPECT_DURATION: int = 60  # Objet devient suspect après 1 minute
-    LOST_DURATION: int = 300    # Objet devient perdu après 5 minutes
-    CRITICAL_DURATION: int = 1800  # Escalade après 30 minutes
-    
-    # Seuils spatiaux (en mètres)
-    OWNER_PROXIMITY_RADIUS: float = 3.0  # Rayon de proximité propriétaire
-    MOVEMENT_THRESHOLD: float = 0.5       # Seuil de mouvement (mètres)
-    
-    # Seuils de confiance pour objets perdus
-    LOST_OBJECT_MIN_CONFIDENCE: float = 0.6
-    TRACKING_STABILITY_THRESHOLD: float = 0.8
-    
-    # === PERFORMANCE ET OPTIMISATION ===
-    CACHE_TTL: int = 300  # 5 minutes
-    MAX_CACHE_SIZE: int = 1000
-    REQUEST_TIMEOUT: int = 60
-    MAX_CONCURRENT_REQUESTS: int = 10
-    
-    # === WEBSOCKET ===
-    WS_HEARTBEAT_INTERVAL: int = 30
-    WS_MAX_CONNECTIONS: int = 100
-    WS_MESSAGE_SIZE_LIMIT: int = 10 * 1024 * 1024  # 10MB
-    
-    # === SÉCURITÉ ===
-    SECRET_KEY: str = "your-secret-key-change-in-production"
-    API_KEY_HEADER: str = "X-API-Key"
-    ALLOWED_ORIGINS: List[str] = [
-        "http://localhost:3000",
-        "http://localhost:8080",
-        "http://frontend:3000",
-        "http://backend:8080"
-    ]
-    
-    # === MONITORING ===
-    ENABLE_METRICS: bool = True
-    METRICS_PORT: int = 9000
-    HEALTH_CHECK_INTERVAL: int = 30
-    
-    # === LOGGING ===
-    LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    LOG_FILE_MAX_SIZE: int = 10 * 1024 * 1024  # 10MB
-    LOG_FILE_BACKUP_COUNT: int = 5
-    
-    # === EXTERNAL SERVICES ===
-    SENTRY_DSN: Optional[str] = None
-    PROMETHEUS_ENABLED: bool = False
-    
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = True
-    
-    @validator('STORAGE_DIR', 'MODELS_DIR', 'TEMP_DIR', 'CACHE_DIR', 'LOGS_DIR')
-    def create_directories(cls, v):
-        """📁 Créer les répertoires s'ils n'existent pas"""
-        path = Path(v)
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    
-    @validator('DEVICE')
-    def validate_device(cls, v):
-        """🔧 Validation du device"""
-        valid_devices = ['auto', 'cpu', 'cuda', 'mps']
-        if v not in valid_devices:
-            raise ValueError(f"Device doit être un de: {valid_devices}")
-        return v
-    
-    @validator('DEFAULT_CONFIDENCE_THRESHOLD', 'DEFAULT_NMS_THRESHOLD')
-    def validate_thresholds(cls, v):
-        """🎯 Validation des seuils"""
-        if not 0.1 <= v <= 0.9:
-            raise ValueError("Les seuils doivent être entre 0.1 et 0.9")
-        return v
-    
-    def get_model_path(self, model_name: str) -> Path:
-        """📂 Retourne le chemin d'un modèle"""
-        return self.MODELS_DIR / f"{model_name}.pth"
-    
-    def get_temp_path(self, filename: str) -> Path:
-        """📂 Retourne un chemin temporaire"""
-        return self.TEMP_DIR / filename
-    
-    def get_cache_path(self, cache_key: str) -> Path:
-        """📂 Retourne un chemin de cache"""
-        return self.CACHE_DIR / cache_key
-    
-    def is_development(self) -> bool:
-        """🧪 Vérifie si on est en développement"""
-        return self.ENVIRONMENT == Environment.DEVELOPMENT
-    
-    def is_production(self) -> bool:
-        """🏭 Vérifie si on est en production"""
-        return self.ENVIRONMENT == Environment.PRODUCTION
-    
-    def get_class_name_fr(self, class_id: int) -> str:
-        """🏷️ Retourne le nom français d'une classe"""
-        if 0 <= class_id < len(self.CLASSES_FR_NAMES):
-            return self.CLASSES_FR_NAMES[class_id]
-        return f"Inconnu_{class_id}"
-    
-    def get_class_id(self, class_name: str) -> int:
-        """🏷️ Retourne l'ID d'une classe"""
-        try:
-            return self.DETECTION_CLASSES.index(class_name)
-        except ValueError:
-            return -1
+    for directory in directories:
+        directory.mkdir(parents=True, exist_ok=True)
 
-# === CONFIGURATION SPÉCIALISÉE PAR ENVIRONNEMENT ===
-
-class DevelopmentSettings(Settings):
-    """🧪 Configuration développement"""
-    ENVIRONMENT: Environment = Environment.DEVELOPMENT
-    DEBUG: bool = True
-    LOG_LEVEL: LogLevel = LogLevel.DEBUG
-    RELOAD: bool = True
-    WORKERS: int = 1
-    CACHE_TTL: int = 60  # Cache plus court en dev
-
-class ProductionSettings(Settings):
-    """🏭 Configuration production"""
-    ENVIRONMENT: Environment = Environment.PRODUCTION
-    DEBUG: bool = False
-    LOG_LEVEL: LogLevel = LogLevel.INFO
-    RELOAD: bool = False
-    ENABLE_METRICS: bool = True
-    PROMETHEUS_ENABLED: bool = True
-
-class TestingSettings(Settings):
-    """🧪 Configuration tests"""
-    ENVIRONMENT: Environment = Environment.TESTING
-    DEBUG: bool = True
-    LOG_LEVEL: LogLevel = LogLevel.DEBUG
-    DATABASE_URL: str = "sqlite+aiosqlite:///test.db"
-    REDIS_URL: str = "redis://localhost:6379/1"  # DB différente pour tests
-
-# === FACTORY FUNCTION ===
-def get_settings() -> Settings:
-    """🏭 Factory pour récupérer la configuration selon l'environnement"""
-    env = os.getenv("ENVIRONMENT", "development").lower()
-    
-    if env == "production":
-        return ProductionSettings()
-    elif env == "testing":
-        return TestingSettings()
-    else:
-        return DevelopmentSettings()
-
-# === CONFIGURATION AVANCÉE ===
-
-class ModelConfigs:
-    """🤖 Configurations spécialisées par modèle"""
-    
-    EPOCH_30 = {
-        "path": "storage/models/stable_model_epoch_30.pth",
-        "input_size": (640, 640),
-        "mean": [0.485, 0.456, 0.406],
-        "std": [0.229, 0.224, 0.225],
-        "confidence_threshold": 0.5,
-        "nms_threshold": 0.4,
-        "max_detections": 100,
-        "description": "Modèle champion F1=49.86%"
-    }
-    
-    EXTENDED = {
-        "path": "storage/models/best_extended_model.pth", 
-        "input_size": (512, 512),
-        "mean": [0.485, 0.456, 0.406],
-        "std": [0.229, 0.224, 0.225],
-        "confidence_threshold": 0.6,
-        "nms_threshold": 0.45,
-        "max_detections": 50,
-        "description": "Modèle étendu 28 classes"
-    }
-    
-    FAST = {
-        "path": "storage/models/fast_model.pth",
-        "input_size": (416, 416),
-        "mean": [0.485, 0.456, 0.406], 
-        "std": [0.229, 0.224, 0.225],
-        "confidence_threshold": 0.4,
-        "nms_threshold": 0.5,
-        "max_detections": 30,
-        "description": "Modèle optimisé streaming"
-    }
-    
-    MOBILE = {
-        "path": "storage/models/mobile_model.pth",
-        "input_size": (320, 320),
-        "mean": [0.485, 0.456, 0.406],
-        "std": [0.229, 0.224, 0.225], 
-        "confidence_threshold": 0.45,
-        "nms_threshold": 0.5,
-        "max_detections": 20,
-        "description": "Modèle mobile/edge"
-    }
-
-# === INSTANCE GLOBALE ===
-settings = get_settings()
-
-# === EXPORTS ===
-__all__ = [
-    "Settings",
-    "DevelopmentSettings", 
-    "ProductionSettings",
-    "TestingSettings",
-    "ModelConfigs",
-    "get_settings",
-    "settings",
-    "Environment",
-    "LogLevel"
-]
+# Initialisation des répertoires
+ensure_directories()

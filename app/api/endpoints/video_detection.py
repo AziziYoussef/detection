@@ -1,650 +1,630 @@
-"""
-🎬 VIDEO DETECTION ENDPOINT - API POUR DÉTECTION VIDÉO
-=====================================================
-Endpoints FastAPI pour le traitement de vidéos avec détection d'objets
-
-Endpoints disponibles:
-- POST /detect/video - Traitement vidéo complet
-- POST /detect/video/upload - Upload et traitement asynchrone
-- GET /detect/video/status/{job_id} - Statut du traitement
-- GET /detect/video/preview/{video_id} - Prévisualisation
-- GET /detect/video/result/{job_id} - Téléchargement résultats
-"""
-
+# app/api/endpoints/video_detection.py
+from fastapi import APIRouter, HTTPException, File, UploadFile, Form, BackgroundTasks, Depends, Request
+from fastapi.responses import JSONResponse, FileResponse
+import cv2
+import numpy as np
+import tempfile
+import os
+import uuid
 import logging
 import asyncio
-import tempfile
-import shutil
-from typing import List, Optional, Dict, Any
+from typing import Optional, Dict, List, Any
+from datetime import datetime, timedelta
 from pathlib import Path
-import uuid
 import json
-import os
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends, BackgroundTasks
-from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
-from pydantic import BaseModel, ValidationError, Field
+from app.schemas.detection import DetectionResponse, LostObjectAlert
+from app.utils.image_utils import validate_image, get_image_info
+from app.core.model_manager import ModelManager
+from app.config.config import settings
 
-# Imports internes
-from app.services.video_service import VideoService
-from app.services.model_service import ModelService
-from app.schemas.detection import (
-    DetectionRequest, DetectionMode, ModelType, ErrorResponse
-)
-from app.config.config import get_settings
-
+router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Router pour les endpoints de détection vidéo
-router = APIRouter(prefix="/detect", tags=["Video Detection"])
+# Stockage des tâches de traitement vidéo
+video_tasks: Dict[str, Dict] = {}
 
-# === MODÈLES DE REQUÊTE ===
-
-class VideoDetectionRequest(BaseModel):
-    """📝 Requête de détection vidéo"""
-    model_name: ModelType = ModelType.EPOCH_30
-    confidence_threshold: float = Field(0.5, ge=0.1, le=0.9)
-    detection_mode: DetectionMode = DetectionMode.BALANCED
-    max_detections: int = Field(100, gt=0, le=500)
-    enable_lost_detection: bool = True
-    create_annotated_video: bool = False
-    target_fps: float = Field(5.0, gt=0.1, le=30.0)
-    location: Optional[str] = None
-    camera_id: Optional[str] = None
-
-class VideoUploadRequest(BaseModel):
-    """📦 Requête d'upload vidéo asynchrone"""
-    detection_params: VideoDetectionRequest = VideoDetectionRequest()
-    notify_on_completion: bool = False
-    webhook_url: Optional[str] = None
-    priority: str = Field("normal", regex="^(low|normal|high)$")
-
-class VideoJobStatus(BaseModel):
-    """📊 Statut d'un job de traitement vidéo"""
-    job_id: str
-    status: str  # pending, processing, completed, failed, cancelled
-    progress: float = Field(0.0, ge=0.0, le=1.0)
-    frames_processed: int = 0
-    total_frames: Optional[int] = None
-    current_timestamp: float = 0.0
-    estimated_remaining_seconds: Optional[float] = None
-    error_message: Optional[str] = None
-    created_at: str
-    started_at: Optional[str] = None
-    completed_at: Optional[str] = None
-
-class VideoProcessingResult(BaseModel):
-    """📋 Résultat de traitement vidéo"""
-    job_id: str
-    success: bool
-    video_info: Dict[str, Any]
-    processing_summary: Dict[str, Any]
-    output_files: Dict[str, str]
-    model_used: str
-    processing_time_seconds: float
-
-# === STOCKAGE DES JOBS ===
-
-class JobManager:
-    """💼 Gestionnaire de jobs de traitement vidéo"""
+class VideoProcessor:
+    """Processeur de vidéo pour la détection"""
     
-    def __init__(self):
-        self.jobs: Dict[str, Dict[str, Any]] = {}
-        self.job_results: Dict[str, Any] = {}
-        
-    def create_job(self, video_path: str, request: VideoDetectionRequest) -> str:
-        """🆕 Crée un nouveau job"""
-        job_id = str(uuid.uuid4())
-        
-        self.jobs[job_id] = {
-            "id": job_id,
-            "status": "pending",
-            "video_path": video_path,
-            "request": request,
-            "progress": 0.0,
-            "frames_processed": 0,
-            "total_frames": None,
-            "current_timestamp": 0.0,
-            "estimated_remaining": None,
-            "error_message": None,
-            "created_at": datetime.now().isoformat(),
-            "started_at": None,
-            "completed_at": None
-        }
-        
-        return job_id
+    def __init__(self, model_manager: ModelManager):
+        self.model_manager = model_manager
+        self.temp_dir = settings.TEMP_DIR
     
-    def update_job_progress(
-        self, 
-        job_id: str, 
-        progress: float, 
-        frames_processed: int,
-        current_timestamp: float
-    ):
-        """📊 Met à jour le progrès d'un job"""
-        if job_id in self.jobs:
-            self.jobs[job_id].update({
-                "progress": progress,
-                "frames_processed": frames_processed,
-                "current_timestamp": current_timestamp,
-                "status": "processing"
-            })
-    
-    def complete_job(self, job_id: str, result: Dict[str, Any]):
-        """✅ Marque un job comme terminé"""
-        if job_id in self.jobs:
-            self.jobs[job_id].update({
-                "status": "completed",
-                "progress": 1.0,
-                "completed_at": datetime.now().isoformat()
-            })
-            self.job_results[job_id] = result
-    
-    def fail_job(self, job_id: str, error_message: str):
-        """❌ Marque un job comme échoué"""
-        if job_id in self.jobs:
-            self.jobs[job_id].update({
-                "status": "failed",
-                "error_message": error_message,
-                "completed_at": datetime.now().isoformat()
-            })
-    
-    def get_job_status(self, job_id: str) -> Optional[VideoJobStatus]:
-        """📊 Récupère le statut d'un job"""
-        if job_id not in self.jobs:
-            return None
-        
-        job_data = self.jobs[job_id]
-        return VideoJobStatus(**job_data)
-    
-    def get_job_result(self, job_id: str) -> Optional[Dict[str, Any]]:
-        """📋 Récupère le résultat d'un job"""
-        return self.job_results.get(job_id)
-    
-    def cleanup_old_jobs(self, max_age_hours: int = 24):
-        """🧹 Nettoie les anciens jobs"""
-        from datetime import datetime, timedelta
-        
-        cutoff_time = datetime.now() - timedelta(hours=max_age_hours)
-        
-        jobs_to_remove = []
-        for job_id, job_data in self.jobs.items():
-            job_time = datetime.fromisoformat(job_data["created_at"])
-            if job_time < cutoff_time:
-                jobs_to_remove.append(job_id)
-        
-        for job_id in jobs_to_remove:
-            if job_id in self.jobs:
-                del self.jobs[job_id]
-            if job_id in self.job_results:
-                del self.job_results[job_id]
-        
-        if jobs_to_remove:
-            logger.info(f"🧹 {len(jobs_to_remove)} anciens jobs supprimés")
-
-# Instance globale du gestionnaire de jobs
-job_manager = JobManager()
-
-# === DÉPENDANCES ===
-
-async def get_video_service() -> VideoService:
-    """🔧 Récupère le service vidéo"""
-    from app.main import app
-    if hasattr(app.state, 'video_service'):
-        return app.state.video_service
-    raise HTTPException(status_code=503, detail="Service vidéo non disponible")
-
-async def get_model_service() -> ModelService:
-    """🔧 Récupère le service de modèles"""
-    from app.main import app
-    if hasattr(app.state, 'model_service'):
-        return app.state.model_service
-    raise HTTPException(status_code=503, detail="Service de modèles non disponible")
-
-def validate_video_file(file: UploadFile) -> UploadFile:
-    """✅ Valide un fichier vidéo uploadé"""
-    
-    # Types MIME supportés
-    allowed_mimes = {
-        'video/mp4', 'video/avi', 'video/mov', 'video/mkv',
-        'video/wmv', 'video/flv', 'video/webm', 'video/quicktime'
-    }
-    
-    if file.content_type not in allowed_mimes:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Type de fichier non supporté: {file.content_type}"
-        )
-    
-    # Vérification taille (500MB max)
-    max_size = 500 * 1024 * 1024
-    if hasattr(file.file, 'seek') and hasattr(file.file, 'tell'):
-        file.file.seek(0, 2)
-        size = file.file.tell()
-        file.file.seek(0)
-        
-        if size > max_size:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Fichier trop volumineux: {size / 1024 / 1024:.1f}MB (max: 500MB)"
-            )
-    
-    return file
-
-# === ENDPOINTS PRINCIPAUX ===
-
-@router.post("/video")
-async def process_video_sync(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(..., description="Fichier vidéo à analyser"),
-    model_name: ModelType = Form(ModelType.EPOCH_30),
-    confidence_threshold: float = Form(0.5, ge=0.1, le=0.9),
-    detection_mode: DetectionMode = Form(DetectionMode.BALANCED),
-    max_detections: int = Form(100, gt=0, le=500),
-    enable_lost_detection: bool = Form(True),
-    create_annotated_video: bool = Form(False),
-    target_fps: float = Form(5.0, gt=0.1, le=30.0),
-    location: Optional[str] = Form(None),
-    camera_id: Optional[str] = Form(None),
-    video_service: VideoService = Depends(get_video_service)
-):
-    """
-    🎬 Traite une vidéo de manière synchrone
-    
-    Traitement direct avec attente du résultat.
-    Recommandé pour vidéos courtes (<2 minutes).
-    
-    - **file**: Fichier vidéo (MP4, AVI, MOV, etc.)
-    - **model_name**: Modèle à utiliser
-    - **confidence_threshold**: Seuil de confiance (0.1-0.9)
-    - **enable_lost_detection**: Activer détection objets perdus
-    - **create_annotated_video**: Créer vidéo annotée
-    - **target_fps**: FPS pour l'analyse (1-30)
-    """
-    
-    request_id = str(uuid.uuid4())
-    logger.info(f"🎬 Traitement vidéo synchrone: {request_id}")
-    
-    temp_file = None
-    
-    try:
-        # Validation du fichier
-        validate_video_file(file)
-        
-        # Sauvegarde temporaire
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-        content = await file.read()
-        temp_file.write(content)
-        temp_file.close()
-        
-        # Création de la requête
-        detection_request = DetectionRequest(
-            model_name=model_name,
-            confidence_threshold=confidence_threshold,
-            detection_mode=detection_mode,
-            max_detections=max_detections,
-            enable_lost_detection=enable_lost_detection,
-            return_cropped_objects=create_annotated_video,
-            location=location,
-            camera_id=camera_id
-        )
-        
-        # Traitement de la vidéo
-        result = await video_service.process_video(
-            video_path=temp_file.name,
-            request=detection_request,
-            request_id=request_id
-        )
-        
-        # Nettoyage en arrière-plan
-        background_tasks.add_task(cleanup_temp_files, [temp_file.name])
-        
-        if result["success"]:
-            logger.info(f"✅ Vidéo traitée {request_id}: {result['processing_summary']}")
-            return VideoProcessingResult(**result)
-        else:
-            raise HTTPException(status_code=500, detail=result.get("error", "Erreur inconnue"))
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Erreur traitement vidéo {request_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Erreur traitement: {str(e)}")
-    
-    finally:
-        # Nettoyage immédiat si erreur
-        if temp_file and os.path.exists(temp_file.name):
-            try:
-                os.unlink(temp_file.name)
-            except:
-                pass
-
-@router.post("/video/upload")
-async def upload_video_async(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(..., description="Fichier vidéo à analyser"),
-    request_params: str = Form(..., description="Paramètres JSON de traitement"),
-    video_service: VideoService = Depends(get_video_service)
-):
-    """
-    🎬 Upload et traitement vidéo asynchrone
-    
-    Retourne immédiatement un job_id pour suivre le progrès.
-    Recommandé pour vidéos longues ou traitement en arrière-plan.
-    """
-    
-    job_id = str(uuid.uuid4())
-    logger.info(f"📦 Upload vidéo asynchrone: {job_id}")
-    
-    try:
-        # Parsing des paramètres
+    async def process_video(self, video_path: Path, task_id: str, **kwargs):
+        """Traite une vidéo complète"""
         try:
-            params_dict = json.loads(request_params)
-            upload_request = VideoUploadRequest(**params_dict)
-        except (json.JSONDecodeError, ValidationError) as e:
-            raise HTTPException(status_code=422, detail=f"Paramètres invalides: {e}")
+            # Mise à jour du statut
+            video_tasks[task_id]['status'] = 'processing'
+            video_tasks[task_id]['started_at'] = datetime.now()
+            
+            # Ouverture de la vidéo
+            cap = cv2.VideoCapture(str(video_path))
+            if not cap.isOpened():
+                raise ValueError("Impossible d'ouvrir la vidéo")
+            
+            # Informations vidéo
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            duration = total_frames / fps if fps > 0 else 0
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            video_tasks[task_id].update({
+                'total_frames': total_frames,
+                'fps': fps,
+                'duration': duration,
+                'resolution': (width, height),
+                'processed_frames': 0
+            })
+            
+            # Paramètres de traitement
+            model_name = kwargs.get('model_name', 'stable_epoch_30')
+            confidence_threshold = kwargs.get('confidence_threshold', 0.5)
+            frame_skip = kwargs.get('frame_skip', 1)  # Traiter 1 frame sur N
+            max_frames = kwargs.get('max_frames', None)
+            
+            # Récupération du détecteur
+            detector = await self.model_manager.get_detector(model_name)
+            
+            # Résultats de traitement
+            detections_timeline = []
+            alerts_timeline = []
+            frame_count = 0
+            processed_count = 0
+            
+            logger.info(f"Traitement vidéo {task_id}: {total_frames} frames, {fps:.1f} FPS")
+            
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                frame_count += 1
+                
+                # Skip frames si nécessaire
+                if frame_count % frame_skip != 0:
+                    continue
+                
+                # Limite de frames si spécifiée
+                if max_frames and processed_count >= max_frames:
+                    break
+                
+                # Validation de la frame
+                if not validate_image(frame):
+                    continue
+                
+                try:
+                    # Détection sur cette frame
+                    objects, persons, alerts = detector.detect(
+                        frame,
+                        confidence_threshold=confidence_threshold,
+                        enable_tracking=True,
+                        enable_lost_detection=True
+                    )
+                    
+                    # Timestamp de la frame
+                    timestamp = frame_count / fps if fps > 0 else processed_count
+                    
+                    # Stockage des résultats
+                    frame_result = {
+                        'frame_number': frame_count,
+                        'timestamp': timestamp,
+                        'objects_count': len(objects),
+                        'persons_count': len(persons),
+                        'objects': [self._serialize_object(obj) for obj in objects],
+                        'persons': [self._serialize_person(person) for person in persons]
+                    }
+                    detections_timeline.append(frame_result)
+                    
+                    # Alertes
+                    for alert in alerts:
+                        alert_data = alert.dict()
+                        alert_data['frame_number'] = frame_count
+                        alert_data['timestamp'] = timestamp
+                        alerts_timeline.append(alert_data)
+                    
+                    processed_count += 1
+                    
+                    # Mise à jour du progrès
+                    video_tasks[task_id]['processed_frames'] = processed_count
+                    video_tasks[task_id]['progress'] = (frame_count / total_frames) * 100
+                    
+                    # Log périodique
+                    if processed_count % 100 == 0:
+                        logger.info(f"Vidéo {task_id}: {processed_count} frames traitées "
+                                  f"({video_tasks[task_id]['progress']:.1f}%)")
+                
+                except Exception as e:
+                    logger.error(f"Erreur traitement frame {frame_count}: {e}")
+                    continue
+            
+            # Fermeture
+            cap.release()
+            
+            # Génération du rapport final
+            report = self._generate_video_report(
+                detections_timeline, alerts_timeline, video_tasks[task_id]
+            )
+            
+            # Sauvegarde du rapport
+            report_path = self.temp_dir / f"report_{task_id}.json"
+            with open(report_path, 'w', encoding='utf-8') as f:
+                json.dump(report, f, indent=2, ensure_ascii=False, default=str)
+            
+            # Finalisation
+            video_tasks[task_id].update({
+                'status': 'completed',
+                'completed_at': datetime.now(),
+                'report_path': str(report_path),
+                'detections_count': len(detections_timeline),
+                'alerts_count': len(alerts_timeline),
+                'report': report
+            })
+            
+            logger.info(f"Vidéo {task_id} traitée: {processed_count} frames, "
+                       f"{len(alerts_timeline)} alertes")
+            
+        except Exception as e:
+            logger.error(f"Erreur traitement vidéo {task_id}: {e}")
+            video_tasks[task_id].update({
+                'status': 'error',
+                'error': str(e),
+                'completed_at': datetime.now()
+            })
+            raise
         
-        # Validation du fichier
-        validate_video_file(file)
-        
-        # Sauvegarde permanente pour traitement asynchrone
-        settings = get_settings()
-        video_filename = f"video_{job_id}_{file.filename}"
-        video_path = settings.TEMP_DIR / "uploads" / video_filename
-        video_path.parent.mkdir(exist_ok=True)
-        
-        # Sauvegarde du fichier
-        with open(video_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
-        
-        # Création du job
-        job_manager.create_job(str(video_path), upload_request.detection_params)
-        
-        # Lancement du traitement en arrière-plan
-        background_tasks.add_task(
-            process_video_background,
-            job_id,
-            str(video_path),
-            upload_request,
-            video_service
-        )
-        
+        finally:
+            # Nettoyage du fichier temporaire
+            try:
+                if video_path.exists():
+                    os.unlink(video_path)
+            except Exception as e:
+                logger.warning(f"Impossible de supprimer {video_path}: {e}")
+    
+    def _serialize_object(self, obj) -> dict:
+        """Sérialise un objet pour JSON"""
         return {
-            "job_id": job_id,
-            "status": "pending",
-            "message": "Vidéo uploadée, traitement en cours",
-            "estimated_duration": "Calcul en cours...",
-            "status_url": f"/detect/video/status/{job_id}"
+            'object_id': obj.object_id,
+            'class_name': obj.class_name,
+            'class_name_fr': obj.class_name_fr,
+            'confidence': obj.confidence,
+            'bounding_box': {
+                'x': obj.bounding_box.x,
+                'y': obj.bounding_box.y,
+                'width': obj.bounding_box.width,
+                'height': obj.bounding_box.height
+            },
+            'status': obj.status.value,
+            'duration_stationary': obj.duration_stationary
         }
+    
+    def _serialize_person(self, person) -> dict:
+        """Sérialise une personne pour JSON"""
+        return {
+            'person_id': person.person_id,
+            'confidence': person.confidence,
+            'bounding_box': {
+                'x': person.bounding_box.x,
+                'y': person.bounding_box.y,
+                'width': person.bounding_box.width,
+                'height': person.bounding_box.height
+            },
+            'position': person.position
+        }
+    
+    def _generate_video_report(self, detections: List, alerts: List, task_info: dict) -> dict:
+        """Génère un rapport de traitement vidéo"""
+        # Statistiques globales
+        total_objects = sum(frame['objects_count'] for frame in detections)
+        total_persons = sum(frame['persons_count'] for frame in detections)
         
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Erreur upload vidéo {job_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Erreur upload: {str(e)}")
-
-@router.get("/video/status/{job_id}")
-async def get_video_processing_status(job_id: str):
-    """📊 Récupère le statut d'un traitement vidéo"""
-    
-    status = job_manager.get_job_status(job_id)
-    
-    if not status:
-        raise HTTPException(status_code=404, detail="Job non trouvé")
-    
-    # Calcul du temps restant estimé
-    if status.status == "processing" and status.progress > 0:
-        # Estimation basée sur le progrès actuel
-        if status.started_at:
-            from datetime import datetime
-            start_time = datetime.fromisoformat(status.started_at)
-            elapsed = (datetime.now() - start_time).total_seconds()
-            estimated_total = elapsed / status.progress
-            remaining = max(0, estimated_total - elapsed)
-            status.estimated_remaining_seconds = remaining
-    
-    return status
-
-@router.get("/video/result/{job_id}")
-async def get_video_processing_result(job_id: str):
-    """📋 Récupère le résultat d'un traitement vidéo"""
-    
-    status = job_manager.get_job_status(job_id)
-    
-    if not status:
-        raise HTTPException(status_code=404, detail="Job non trouvé")
-    
-    if status.status != "completed":
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Job non terminé (statut: {status.status})"
-        )
-    
-    result = job_manager.get_job_result(job_id)
-    
-    if not result:
-        raise HTTPException(status_code=404, detail="Résultat non trouvé")
-    
-    return VideoProcessingResult(**result)
-
-@router.get("/video/preview/{video_id}")
-async def get_video_preview(
-    video_id: str,
-    timestamps: str = "0,25,50,75,100",  # Pourcentages
-    video_service: VideoService = Depends(get_video_service)
-):
-    """👁️ Génère des images de prévisualisation d'une vidéo"""
-    
-    try:
-        # Conversion des timestamps (pourcentages vers secondes)
-        timestamp_percentages = [float(t) for t in timestamps.split(",")]
+        # Analyse temporelle des objets perdus
+        lost_objects_over_time = []
+        for frame in detections:
+            lost_count = sum(1 for obj in frame['objects'] 
+                           if obj['status'] in ['lost', 'critical'])
+            lost_objects_over_time.append({
+                'timestamp': frame['timestamp'],
+                'frame_number': frame['frame_number'],
+                'lost_objects': lost_count
+            })
         
-        # Pour cet exemple, on suppose que l'info vidéo est disponible
-        # En pratique, il faudrait récupérer la durée de la vidéo
-        video_duration = 60.0  # Exemple: 60 secondes
+        # Distribution des classes d'objets
+        class_distribution = {}
+        for frame in detections:
+            for obj in frame['objects']:
+                class_name = obj['class_name_fr']
+                class_distribution[class_name] = class_distribution.get(class_name, 0) + 1
         
-        timestamp_seconds = [
-            (percent / 100) * video_duration 
-            for percent in timestamp_percentages
+        # Alertes par période
+        alerts_by_minute = {}
+        for alert in alerts:
+            minute = int(alert['timestamp'] // 60)
+            alerts_by_minute[minute] = alerts_by_minute.get(minute, 0) + 1
+        
+        # Périodes critiques (> 2 alertes par minute)
+        critical_periods = [
+            {'minute': minute, 'alerts_count': count}
+            for minute, count in alerts_by_minute.items()
+            if count > 2
         ]
         
-        # Génération des prévisualisations
-        # Note: Ceci nécessiterait d'avoir accès au fichier vidéo
-        preview_paths = await video_service.get_video_preview(
-            video_path=f"path/to/video_{video_id}",  # À adapter
-            timestamps=timestamp_seconds
-        )
-        
         return {
-            "video_id": video_id,
-            "preview_images": [
-                {
-                    "timestamp": ts,
-                    "percentage": (ts / video_duration) * 100,
-                    "image_url": f"/detect/video/preview/image/{Path(path).name}"
-                }
-                for ts, path in zip(timestamp_seconds, preview_paths)
-            ]
+            'task_info': {
+                'task_id': task_info['task_id'],
+                'video_duration': task_info['duration'],
+                'total_frames': task_info['total_frames'],
+                'processed_frames': task_info['processed_frames'],
+                'fps': task_info['fps'],
+                'resolution': task_info['resolution'],
+                'processing_time': (task_info.get('completed_at', datetime.now()) - 
+                                  task_info.get('started_at', datetime.now())).total_seconds()
+            },
+            'statistics': {
+                'total_detections': len(detections),
+                'total_objects': total_objects,
+                'total_persons': total_persons,
+                'total_alerts': len(alerts),
+                'avg_objects_per_frame': total_objects / len(detections) if detections else 0,
+                'avg_persons_per_frame': total_persons / len(detections) if detections else 0
+            },
+            'class_distribution': class_distribution,
+            'lost_objects_timeline': lost_objects_over_time,
+            'alerts_timeline': alerts,
+            'critical_periods': critical_periods,
+            'recommendations': self._generate_recommendations(
+                detections, alerts, class_distribution
+            )
         }
+    
+    def _generate_recommendations(self, detections: List, alerts: List, 
+                                class_distribution: dict) -> List[str]:
+        """Génère des recommandations basées sur l'analyse"""
+        recommendations = []
         
-    except Exception as e:
-        logger.error(f"❌ Erreur prévisualisation vidéo {video_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        if len(alerts) > 10:
+            recommendations.append("🚨 Nombre élevé d'alertes détecté - vérifier la configuration des seuils")
+        
+        if len(detections) > 0:
+            avg_objects = sum(f['objects_count'] for f in detections) / len(detections)
+            if avg_objects > 10:
+                recommendations.append("📦 Scène dense détectée - considérer l'optimisation des paramètres NMS")
+        
+        # Top objets perdus
+        top_lost_classes = sorted(class_distribution.items(), key=lambda x: x[1], reverse=True)[:3]
+        if top_lost_classes:
+            top_class = top_lost_classes[0][0]
+            recommendations.append(f"📊 Objet le plus fréquent: {top_class} - surveillance renforcée recommandée")
+        
+        if not recommendations:
+            recommendations.append("✅ Aucune anomalie détectée - surveillance normale")
+        
+        return recommendations
 
-# === ENDPOINTS DE TÉLÉCHARGEMENT ===
+async def get_model_manager(request: Request) -> ModelManager:
+    """Récupère le gestionnaire de modèles"""
+    return request.app.state.model_manager
 
-@router.get("/video/download/{job_id}/{file_type}")
-async def download_video_result_file(job_id: str, file_type: str):
-    """📁 Télécharge un fichier de résultat vidéo"""
-    
-    # Vérifier que le job existe et est terminé
-    status = job_manager.get_job_status(job_id)
-    if not status or status.status != "completed":
-        raise HTTPException(status_code=404, detail="Résultat non disponible")
-    
-    # Récupérer les fichiers de sortie
-    result = job_manager.get_job_result(job_id)
-    if not result or "output_files" not in result:
-        raise HTTPException(status_code=404, detail="Fichiers de sortie non trouvés")
-    
-    output_files = result["output_files"]
-    
-    # Vérifier que le type de fichier demandé existe
-    if file_type not in output_files:
-        available_types = list(output_files.keys())
-        raise HTTPException(
-            status_code=404, 
-            detail=f"Type de fichier non disponible. Types disponibles: {available_types}"
-        )
-    
-    file_path = Path(output_files[file_type])
-    
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Fichier non trouvé sur le disque")
-    
-    # Déterminer le type MIME
-    mime_types = {
-        "timeline": "application/json",
-        "annotated_video": "video/mp4",
-        "summary": "application/json"
-    }
-    
-    media_type = mime_types.get(file_type, "application/octet-stream")
-    
-    return FileResponse(
-        path=str(file_path),
-        filename=f"{job_id}_{file_type}{file_path.suffix}",
-        media_type=media_type
-    )
-
-# === ENDPOINTS D'INFORMATION ===
-
-@router.get("/video/formats")
-async def get_supported_video_formats(
-    video_service: VideoService = Depends(get_video_service)
+@router.post("/video")
+async def detect_objects_in_video(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    model_name: Optional[str] = Form("stable_epoch_30"),
+    confidence_threshold: Optional[float] = Form(0.5),
+    frame_skip: Optional[int] = Form(1),
+    max_frames: Optional[int] = Form(None),
+    model_manager: ModelManager = Depends(get_model_manager)
 ):
-    """📋 Formats vidéo supportés"""
+    """
+    🎬 Lance le traitement d'une vidéo pour détecter les objets perdus
     
-    formats = video_service.get_supported_formats()
+    **Paramètres:**
+    - file: Fichier vidéo (MP4, AVI, MOV, etc.)
+    - model_name: Modèle à utiliser pour la détection
+    - confidence_threshold: Seuil de confiance (0.0-1.0)
+    - frame_skip: Traiter 1 frame sur N (1=toutes, 2=une sur deux, etc.)
+    - max_frames: Limite du nombre de frames à traiter
     
-    return {
-        "supported_formats": formats,
-        "max_file_size_mb": 500,
-        "max_duration_minutes": 30,
-        "recommended_formats": [".mp4", ".avi", ".mov"],
-        "processing_info": {
-            "default_analysis_fps": 5.0,
-            "max_analysis_fps": 30.0,
-            "supports_lost_object_tracking": True,
-            "supports_annotated_output": True
-        }
-    }
-
-@router.get("/video/statistics")
-async def get_video_processing_statistics(
-    video_service: VideoService = Depends(get_video_service)
-):
-    """📊 Statistiques de traitement vidéo"""
-    
-    service_stats = video_service.get_service_statistics()
-    
-    # Statistiques des jobs
-    job_stats = {
-        "total_jobs": len(job_manager.jobs),
-        "pending_jobs": len([j for j in job_manager.jobs.values() if j["status"] == "pending"]),
-        "processing_jobs": len([j for j in job_manager.jobs.values() if j["status"] == "processing"]),
-        "completed_jobs": len([j for j in job_manager.jobs.values() if j["status"] == "completed"]),
-        "failed_jobs": len([j for j in job_manager.jobs.values() if j["status"] == "failed"])
-    }
-    
-    return {
-        "video_service": service_stats,
-        "job_manager": job_stats
-    }
-
-# === TÂCHES DE BACKGROUND ===
-
-async def process_video_background(
-    job_id: str,
-    video_path: str,
-    request: VideoUploadRequest,
-    video_service: VideoService
-):
-    """🔄 Traite une vidéo en arrière-plan"""
+    **Retour:**
+    - task_id: ID de la tâche pour suivre le progrès
+    - status_url: URL pour suivre l'avancement
+    """
     
     try:
-        # Marquer le job comme commencé
-        from datetime import datetime
-        job_manager.jobs[job_id]["started_at"] = datetime.now().isoformat()
-        job_manager.jobs[job_id]["status"] = "processing"
+        # Validation du fichier
+        if not file.content_type.startswith('video/'):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Type de fichier non supporté: {file.content_type}. "
+                       f"Formats supportés: MP4, AVI, MOV, MKV"
+            )
         
-        # Callback de progression
-        async def progress_callback(progress: float, frames_processed: int, timestamp: float):
-            job_manager.update_job_progress(job_id, progress, frames_processed, timestamp)
+        # Validation des paramètres
+        if not (0.0 <= confidence_threshold <= 1.0):
+            raise HTTPException(
+                status_code=400,
+                detail="confidence_threshold doit être entre 0.0 et 1.0"
+            )
         
-        # Conversion de la requête
-        detection_request = DetectionRequest(
-            model_name=request.detection_params.model_name,
-            confidence_threshold=request.detection_params.confidence_threshold,
-            detection_mode=request.detection_params.detection_mode,
-            max_detections=request.detection_params.max_detections,
-            enable_lost_detection=request.detection_params.enable_lost_detection,
-            return_cropped_objects=request.detection_params.create_annotated_video
+        if frame_skip < 1:
+            raise HTTPException(
+                status_code=400,
+                detail="frame_skip doit être >= 1"
+            )
+        
+        if max_frames is not None and max_frames < 1:
+            raise HTTPException(
+                status_code=400,
+                detail="max_frames doit être >= 1"
+            )
+        
+        # Génération de l'ID de tâche
+        task_id = str(uuid.uuid4())
+        
+        # Sauvegarde temporaire du fichier
+        temp_path = settings.TEMP_DIR / f"video_{task_id}_{file.filename}"
+        
+        try:
+            with open(temp_path, "wb") as buffer:
+                content = await file.read()
+                buffer.write(content)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erreur sauvegarde fichier: {str(e)}"
+            )
+        
+        # Validation basique de la vidéo
+        cap = cv2.VideoCapture(str(temp_path))
+        if not cap.isOpened():
+            os.unlink(temp_path)
+            raise HTTPException(
+                status_code=400,
+                detail="Fichier vidéo invalide ou corrompu"
+            )
+        
+        # Informations basiques
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        duration = total_frames / fps if fps > 0 else 0
+        cap.release()
+        
+        # Vérification des limites
+        if duration > 1800:  # 30 minutes max
+            os.unlink(temp_path)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Vidéo trop longue: {duration/60:.1f} min. Maximum: 30 min"
+            )
+        
+        # Création de la tâche
+        video_tasks[task_id] = {
+            'task_id': task_id,
+            'filename': file.filename,
+            'status': 'queued',
+            'created_at': datetime.now(),
+            'total_frames': total_frames,
+            'fps': fps,
+            'duration': duration,
+            'progress': 0,
+            'model_name': model_name,
+            'confidence_threshold': confidence_threshold,
+            'frame_skip': frame_skip,
+            'max_frames': max_frames
+        }
+        
+        # Lancement du traitement en arrière-plan
+        processor = VideoProcessor(model_manager)
+        background_tasks.add_task(
+            processor.process_video,
+            temp_path,
+            task_id,
+            model_name=model_name,
+            confidence_threshold=confidence_threshold,
+            frame_skip=frame_skip,
+            max_frames=max_frames
         )
         
-        # Traitement de la vidéo
-        result = await video_service.process_video(
-            video_path=video_path,
-            request=detection_request,
-            progress_callback=progress_callback,
-            request_id=job_id
-        )
+        logger.info(f"Tâche vidéo lancée: {task_id} ({file.filename}, {duration:.1f}s)")
         
-        if result["success"]:
-            job_manager.complete_job(job_id, result)
-            logger.info(f"✅ Job vidéo terminé: {job_id}")
-        else:
-            job_manager.fail_job(job_id, result.get("error", "Erreur inconnue"))
-            
+        return {
+            "success": True,
+            "task_id": task_id,
+            "message": f"Traitement vidéo lancé pour {file.filename}",
+            "estimated_duration": f"{duration:.1f} secondes",
+            "total_frames": total_frames,
+            "status_url": f"/api/v1/detect/video/status/{task_id}",
+            "download_url": f"/api/v1/detect/video/report/{task_id}"
+        }
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"❌ Erreur job vidéo {job_id}: {e}")
-        job_manager.fail_job(job_id, str(e))
-    
-    finally:
-        # Nettoyage du fichier vidéo temporaire
-        try:
-            if os.path.exists(video_path):
-                os.unlink(video_path)
-        except:
-            pass
+        logger.error(f"Erreur traitement vidéo: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur interne: {str(e)}"
+        )
 
-async def cleanup_temp_files(file_paths: List[str], delay: int = 0):
-    """🧹 Nettoie des fichiers temporaires"""
+@router.get("/video/status/{task_id}")
+async def get_video_task_status(task_id: str):
+    """
+    📊 Récupère le statut d'une tâche de traitement vidéo
     
-    if delay > 0:
-        await asyncio.sleep(delay)
+    **États possibles:**
+    - queued: En attente de traitement
+    - processing: En cours de traitement
+    - completed: Terminé avec succès
+    - error: Erreur lors du traitement
+    """
     
-    for file_path in file_paths:
-        try:
-            if os.path.exists(file_path):
-                os.unlink(file_path)
-                logger.debug(f"🧹 Fichier temporaire supprimé: {file_path}")
-        except Exception as e:
-            logger.warning(f"⚠️ Erreur suppression fichier {file_path}: {e}")
-
-# === TÂCHE DE NETTOYAGE PÉRIODIQUE ===
-
-async def periodic_cleanup():
-    """🧹 Nettoyage périodique des anciens jobs"""
+    if task_id not in video_tasks:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Tâche {task_id} non trouvée"
+        )
     
-    while True:
-        try:
-            job_manager.cleanup_old_jobs(max_age_hours=24)
-            await asyncio.sleep(3600)  # Toutes les heures
-        except Exception as e:
-            logger.error(f"❌ Erreur nettoyage périodique: {e}")
-            await asyncio.sleep(3600)
+    task = video_tasks[task_id]
+    
+    # Calcul du temps écoulé
+    now = datetime.now()
+    elapsed = (now - task['created_at']).total_seconds()
+    
+    # Estimation du temps restant
+    eta = None
+    if task['status'] == 'processing' and task.get('progress', 0) > 0:
+        progress_ratio = task['progress'] / 100
+        estimated_total = elapsed / progress_ratio
+        eta = max(0, estimated_total - elapsed)
+    
+    response = {
+        "task_id": task_id,
+        "status": task['status'],
+        "progress": task.get('progress', 0),
+        "created_at": task['created_at'].isoformat(),
+        "elapsed_seconds": elapsed,
+        "estimated_remaining_seconds": eta,
+        "filename": task['filename'],
+        "total_frames": task.get('total_frames', 0),
+        "processed_frames": task.get('processed_frames', 0)
+    }
+    
+    # Informations additionnelles selon le statut
+    if task['status'] == 'completed':
+        response.update({
+            "completed_at": task.get('completed_at', '').isoformat() if task.get('completed_at') else '',
+            "detections_count": task.get('detections_count', 0),
+            "alerts_count": task.get('alerts_count', 0),
+            "report_available": True
+        })
+    
+    elif task['status'] == 'error':
+        response.update({
+            "error": task.get('error', 'Erreur inconnue'),
+            "completed_at": task.get('completed_at', '').isoformat() if task.get('completed_at') else ''
+        })
+    
+    return response
 
-# === EXPORTS ===
-__all__ = ["router", "job_manager"]
+@router.get("/video/report/{task_id}")
+async def download_video_report(task_id: str):
+    """
+    📥 Télécharge le rapport de traitement vidéo
+    
+    Retourne un fichier JSON contenant:
+    - Timeline des détections
+    - Alertes générées
+    - Statistiques globales
+    - Recommandations
+    """
+    
+    if task_id not in video_tasks:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Tâche {task_id} non trouvée"
+        )
+    
+    task = video_tasks[task_id]
+    
+    if task['status'] != 'completed':
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tâche pas encore terminée (statut: {task['status']})"
+        )
+    
+    report_path = task.get('report_path')
+    if not report_path or not Path(report_path).exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Rapport non disponible"
+        )
+    
+    return FileResponse(
+        path=report_path,
+        filename=f"video_report_{task_id}.json",
+        media_type="application/json"
+    )
+
+@router.get("/video/tasks")
+async def list_video_tasks(limit: int = 50, status: Optional[str] = None):
+    """
+    📋 Liste les tâches de traitement vidéo
+    
+    **Paramètres:**
+    - limit: Nombre maximum de tâches à retourner
+    - status: Filtrer par statut (queued, processing, completed, error)
+    """
+    
+    tasks = list(video_tasks.values())
+    
+    # Filtrage par statut
+    if status:
+        tasks = [task for task in tasks if task['status'] == status]
+    
+    # Tri par date de création (plus récent en premier)
+    tasks.sort(key=lambda x: x['created_at'], reverse=True)
+    
+    # Limitation
+    tasks = tasks[:limit]
+    
+    # Formatage pour la réponse
+    formatted_tasks = []
+    for task in tasks:
+        formatted_task = {
+            "task_id": task['task_id'],
+            "filename": task['filename'],
+            "status": task['status'],
+            "progress": task.get('progress', 0),
+            "created_at": task['created_at'].isoformat(),
+            "duration": task.get('duration', 0)
+        }
+        
+        if task['status'] == 'completed':
+            formatted_task.update({
+                "completed_at": task.get('completed_at', '').isoformat() if task.get('completed_at') else '',
+                "alerts_count": task.get('alerts_count', 0)
+            })
+        
+        formatted_tasks.append(formatted_task)
+    
+    return {
+        "success": True,
+        "total_tasks": len(video_tasks),
+        "filtered_tasks": len(formatted_tasks),
+        "tasks": formatted_tasks
+    }
+
+@router.delete("/video/task/{task_id}")
+async def delete_video_task(task_id: str):
+    """
+    🗑️ Supprime une tâche de traitement vidéo
+    
+    Nettoie les fichiers temporaires et supprime la tâche de la mémoire
+    """
+    
+    if task_id not in video_tasks:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Tâche {task_id} non trouvée"
+        )
+    
+    task = video_tasks[task_id]
+    
+    # Nettoyage des fichiers
+    try:
+        report_path = task.get('report_path')
+        if report_path and Path(report_path).exists():
+            os.unlink(report_path)
+    except Exception as e:
+        logger.warning(f"Impossible de supprimer le rapport {task_id}: {e}")
+    
+    # Suppression de la mémoire
+    del video_tasks[task_id]
+    
+    logger.info(f"Tâche {task_id} supprimée")
+    
+    return {
+        "success": True,
+        "message": f"Tâche {task_id} supprimée"
+    }

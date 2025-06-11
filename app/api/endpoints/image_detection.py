@@ -1,522 +1,436 @@
-"""
-📸 IMAGE DETECTION ENDPOINT - API POUR DÉTECTION D'IMAGES
-=======================================================
-Endpoints FastAPI pour la détection d'objets sur images statiques
-
-Endpoints disponibles:
-- POST /detect/image - Détection sur image unique
-- POST /detect/batch - Détection sur lot d'images
-- GET /detect/formats - Formats supportés
-- GET /detect/models - Modèles disponibles
-- POST /detect/preview - Prévisualisation rapide
-"""
-
+# app/api/endpoints/image_detection.py
+from fastapi import APIRouter, HTTPException, File, UploadFile, Form, Request, Depends
+from fastapi.responses import JSONResponse
+import cv2
+import numpy as np
+import time
 import logging
-import asyncio
-from typing import List, Optional, Dict, Any
-from pathlib import Path
-import uuid
-import tempfile
-import shutil
+from typing import Optional, Dict, Any
+from datetime import datetime
+import io
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends, BackgroundTasks
-from fastapi.responses import JSONResponse, FileResponse
-from pydantic import BaseModel, ValidationError
+from app.schemas.detection import DetectionRequest, DetectionResponse
+from app.utils.image_utils import decode_base64_to_image, get_image_info, validate_image
+from app.core.model_manager import ModelManager
 
-# Imports internes
-from app.services.image_service import ImageService
-from app.services.model_service import ModelService
-from app.schemas.detection import (
-    DetectionRequest, DetectionResponse, BatchDetectionRequest, 
-    BatchDetectionResponse, DetectionMode, ModelType, ErrorResponse
-)
-from app.config.config import get_settings
-
+router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Router pour les endpoints de détection d'images
-router = APIRouter(prefix="/detect", tags=["Image Detection"])
-
-# === MODÈLES DE REQUÊTE ===
-
-class ImageDetectionRequest(BaseModel):
-    """📝 Requête de détection d'image via formulaire"""
-    model_name: ModelType = ModelType.EPOCH_30
-    confidence_threshold: float = 0.5
-    nms_threshold: float = 0.4
-    detection_mode: DetectionMode = DetectionMode.BALANCED
-    max_detections: int = 100
-    enable_lost_detection: bool = False
-    return_annotated_image: bool = False
-    location: Optional[str] = None
-    camera_id: Optional[str] = None
-
-class BatchUploadRequest(BaseModel):
-    """📦 Requête batch avec paramètres communs"""
-    detection_params: ImageDetectionRequest = ImageDetectionRequest()
-    max_parallel: int = 5
-    return_summary: bool = True
-
-class PreviewRequest(BaseModel):
-    """👁️ Requête de prévisualisation rapide"""
-    confidence_threshold: float = 0.3
-    max_detections: int = 10
-
-# === DÉPENDANCES ===
-
-async def get_image_service() -> ImageService:
-    """🔧 Récupère le service d'images"""
-    # Cette fonction sera injectée par le main.py
-    # Pour l'instant, on simule
-    from app.main import app
-    if hasattr(app.state, 'image_service'):
-        return app.state.image_service
-    raise HTTPException(status_code=503, detail="Service d'images non disponible")
-
-async def get_model_service() -> ModelService:
-    """🔧 Récupère le service de modèles"""
-    from app.main import app
-    if hasattr(app.state, 'model_service'):
-        return app.state.model_service
-    raise HTTPException(status_code=503, detail="Service de modèles non disponible")
-
-def validate_image_file(file: UploadFile) -> UploadFile:
-    """✅ Valide un fichier image uploadé"""
-    
-    # Vérification du type MIME
-    allowed_mimes = {
-        'image/jpeg', 'image/jpg', 'image/png', 
-        'image/bmp', 'image/tiff', 'image/webp'
-    }
-    
-    if file.content_type not in allowed_mimes:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Type de fichier non supporté: {file.content_type}"
-        )
-    
-    # Vérification de la taille (50MB max)
-    max_size = 50 * 1024 * 1024
-    if hasattr(file.file, 'seek') and hasattr(file.file, 'tell'):
-        file.file.seek(0, 2)  # Aller à la fin
-        size = file.file.tell()
-        file.file.seek(0)     # Revenir au début
-        
-        if size > max_size:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Fichier trop volumineux: {size / 1024 / 1024:.1f}MB (max: 50MB)"
-            )
-    
-    return file
-
-# === ENDPOINTS PRINCIPAUX ===
+async def get_model_manager(request: Request) -> ModelManager:
+    """Récupère le gestionnaire de modèles depuis l'état de l'application"""
+    return request.app.state.model_manager
 
 @router.post("/image", response_model=DetectionResponse)
 async def detect_objects_in_image(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(..., description="Fichier image à analyser"),
-    model_name: ModelType = Form(ModelType.EPOCH_30),
-    confidence_threshold: float = Form(0.5, ge=0.1, le=0.9),
-    nms_threshold: float = Form(0.4, ge=0.1, le=0.9),
-    detection_mode: DetectionMode = Form(DetectionMode.BALANCED),
-    max_detections: int = Form(100, gt=0, le=500),
-    enable_lost_detection: bool = Form(False),
-    return_annotated_image: bool = Form(False),
-    location: Optional[str] = Form(None),
-    camera_id: Optional[str] = Form(None),
-    image_service: ImageService = Depends(get_image_service)
+    request: Request,
+    file: Optional[UploadFile] = File(None),
+    image_base64: Optional[str] = Form(None),
+    model_name: Optional[str] = Form("stable_epoch_30"),
+    confidence_threshold: Optional[float] = Form(0.5),
+    nms_threshold: Optional[float] = Form(0.5),
+    max_detections: Optional[int] = Form(50),
+    enable_tracking: bool = Form(True),
+    enable_lost_detection: bool = Form(True),
+    model_manager: ModelManager = Depends(get_model_manager)
 ):
     """
-    🎯 Détecte les objets dans une image uploadée
+    🔍 Détecte les objets dans une image
     
-    - **file**: Fichier image (JPG, PNG, WebP, etc.)
-    - **model_name**: Modèle à utiliser (epoch_30, extended, fast, mobile)
-    - **confidence_threshold**: Seuil de confiance (0.1-0.9)
-    - **detection_mode**: Mode de détection (ultra_fast, fast, balanced, quality)
-    - **enable_lost_detection**: Activer la détection d'objets perdus
-    - **return_annotated_image**: Retourner l'image annotée
+    **Entrées supportées:**
+    - Upload de fichier image (multipart/form-data)
+    - Image encodée en base64 (form field)
+    
+    **Paramètres:**
+    - model_name: Nom du modèle à utiliser
+    - confidence_threshold: Seuil de confiance (0.0-1.0)
+    - nms_threshold: Seuil pour Non-Maximum Suppression
+    - max_detections: Nombre maximum d'objets détectés
+    - enable_tracking: Activer le suivi d'objets
+    - enable_lost_detection: Activer la détection d'objets perdus
     """
-    
-    request_id = str(uuid.uuid4())
-    logger.info(f"📸 Nouvelle requête détection image: {request_id}")
+    start_time = time.time()
     
     try:
-        # Validation du fichier
-        validate_image_file(file)
-        
-        # Lecture du fichier
-        image_data = await file.read()
-        
-        # Création de la requête
-        detection_request = DetectionRequest(
-            model_name=model_name,
-            confidence_threshold=confidence_threshold,
-            nms_threshold=nms_threshold,
-            detection_mode=detection_mode,
-            max_detections=max_detections,
-            enable_lost_detection=enable_lost_detection,
-            return_cropped_objects=return_annotated_image,
-            location=location,
-            camera_id=camera_id
-        )
-        
-        # Traitement
-        result = await image_service.detect_objects_in_image(
-            image_data=image_data,
-            request=detection_request,
-            request_id=request_id
-        )
-        
-        # Nettoyage en arrière-plan si nécessaire
-        if return_annotated_image and hasattr(result, 'annotated_image_path'):
-            background_tasks.add_task(
-                cleanup_temp_file, 
-                result.annotated_image_path,
-                delay=3600  # 1 heure
-            )
-        
-        logger.info(
-            f"✅ Détection terminée {request_id}: "
-            f"{result.total_objects} objets, {result.lost_objects_count} perdus"
-        )
-        
-        return result
-        
-    except ValidationError as e:
-        logger.error(f"❌ Erreur validation {request_id}: {e}")
-        raise HTTPException(status_code=422, detail=str(e))
-        
-    except Exception as e:
-        logger.error(f"❌ Erreur détection {request_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Erreur interne: {str(e)}")
-
-@router.post("/batch", response_model=BatchDetectionResponse)
-async def detect_objects_batch(
-    background_tasks: BackgroundTasks,
-    files: List[UploadFile] = File(..., description="Liste de fichiers images"),
-    request_params: str = Form(..., description="Paramètres JSON de la requête"),
-    image_service: ImageService = Depends(get_image_service)
-):
-    """
-    📦 Détection sur un lot d'images
-    
-    Traite plusieurs images en parallèle avec les mêmes paramètres.
-    Optimisé pour de gros volumes avec traitement asynchrone.
-    """
-    
-    batch_id = str(uuid.uuid4())
-    logger.info(f"📦 Nouvelle requête batch: {batch_id} ({len(files)} images)")
-    
-    try:
-        # Parsing des paramètres
-        import json
-        try:
-            params_dict = json.loads(request_params)
-            batch_request = BatchUploadRequest(**params_dict)
-        except (json.JSONDecodeError, ValidationError) as e:
-            raise HTTPException(status_code=422, detail=f"Paramètres invalides: {e}")
-        
-        # Validation du nombre de fichiers
-        if len(files) > 50:
+        # Validation des entrées
+        if not file and not image_base64:
             raise HTTPException(
-                status_code=400, 
-                detail=f"Trop de fichiers: {len(files)} (max: 50)"
+                status_code=400,
+                detail="Aucune image fournie. Utilisez 'file' ou 'image_base64'"
             )
         
-        # Validation de tous les fichiers
-        validated_files = []
-        for i, file in enumerate(files):
+        # Chargement de l'image
+        if file:
+            # Upload de fichier
+            if not file.content_type.startswith('image/'):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Type de fichier non supporté: {file.content_type}"
+                )
+            
+            # Lecture du fichier
+            image_data = await file.read()
+            nparr = np.frombuffer(image_data, np.uint8)
+            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if image is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Impossible de décoder l'image uploadée"
+                )
+        
+        else:
+            # Image base64
             try:
-                validate_image_file(file)
-                validated_files.append(file)
-            except HTTPException as e:
-                logger.warning(f"⚠️ Fichier {i} invalide: {e.detail}")
-                # Continuer avec les autres fichiers
+                image = decode_base64_to_image(image_base64)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Erreur décodage base64: {str(e)}"
+                )
         
-        if not validated_files:
-            raise HTTPException(status_code=400, detail="Aucun fichier valide")
+        # Validation de l'image
+        if not validate_image(image):
+            raise HTTPException(
+                status_code=400,
+                detail="Image invalide ou corrompue"
+            )
         
-        # Lecture de tous les fichiers
-        images_data = []
-        for file in validated_files:
-            content = await file.read()
-            images_data.append(content)
+        # Informations sur l'image
+        img_info = get_image_info(image)
+        logger.info(f"Image reçue: {img_info['width']}x{img_info['height']}, "
+                   f"{img_info['size_bytes']/1024:.1f} KB")
         
-        # Conversion de la requête
-        detection_request = DetectionRequest(
-            model_name=batch_request.detection_params.model_name,
-            confidence_threshold=batch_request.detection_params.confidence_threshold,
-            nms_threshold=batch_request.detection_params.nms_threshold,
-            detection_mode=batch_request.detection_params.detection_mode,
-            max_detections=batch_request.detection_params.max_detections,
-            enable_lost_detection=batch_request.detection_params.enable_lost_detection,
-            return_cropped_objects=batch_request.detection_params.return_annotated_image
-        )
+        # Validation des paramètres
+        if not (0.0 <= confidence_threshold <= 1.0):
+            raise HTTPException(
+                status_code=400,
+                detail="confidence_threshold doit être entre 0.0 et 1.0"
+            )
         
-        # Traitement batch
-        results = await image_service.detect_objects_batch(
-            images_data=images_data,
-            request=detection_request,
-            batch_id=batch_id
-        )
+        if not (0.0 <= nms_threshold <= 1.0):
+            raise HTTPException(
+                status_code=400,
+                detail="nms_threshold doit être entre 0.0 et 1.0"
+            )
         
-        # Calcul du résumé
-        successful_results = [r for r in results if r.success]
-        failed_count = len(results) - len(successful_results)
+        if not (1 <= max_detections <= 100):
+            raise HTTPException(
+                status_code=400,
+                detail="max_detections doit être entre 1 et 100"
+            )
         
-        total_objects = sum(r.total_objects for r in successful_results)
-        total_lost_objects = sum(r.lost_objects_count for r in successful_results)
-        total_processing_time = sum(r.processing_time_ms for r in results)
+        # Récupération du détecteur
+        try:
+            detector = await model_manager.get_detector(model_name)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Modèle non disponible: {str(e)}"
+            )
+        except Exception as e:
+            logger.error(f"Erreur chargement modèle {model_name}: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erreur interne: impossible de charger le modèle"
+            )
         
-        summary = {
-            "total_images": len(files),
-            "successful_images": len(successful_results),
-            "failed_images": failed_count,
-            "total_objects_detected": total_objects,
-            "total_lost_objects": total_lost_objects,
-            "average_processing_time_ms": total_processing_time / len(results) if results else 0
-        }
+        # Détection
+        detection_start = time.time()
         
-        # Construction de la réponse
-        batch_response = BatchDetectionResponse(
+        try:
+            objects, persons, alerts = detector.detect(
+                image,
+                confidence_threshold=confidence_threshold,
+                nms_threshold=nms_threshold,
+                max_detections=max_detections,
+                enable_tracking=enable_tracking,
+                enable_lost_detection=enable_lost_detection
+            )
+        except Exception as e:
+            logger.error(f"Erreur lors de la détection: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erreur lors de la détection: {str(e)}"
+            )
+        
+        detection_time = (time.time() - detection_start) * 1000  # en ms
+        total_time = (time.time() - start_time) * 1000  # en ms
+        
+        # Mise à jour des statistiques
+        model_manager.update_inference_stats(model_name, detection_time)
+        
+        # Comptage des objets par statut
+        lost_count = sum(1 for obj in objects if obj.status.value in ['lost', 'critical'])
+        suspect_count = sum(1 for obj in objects if obj.status.value in ['suspect', 'surveillance'])
+        
+        # Création de la réponse
+        response = DetectionResponse(
             success=True,
-            results=results,
-            summary=summary,
-            total_processing_time_ms=total_processing_time,
-            batch_size=len(files),
-            failed_items=[
-                {"index": i, "error": "Validation failed"} 
-                for i in range(len(files)) 
-                if i >= len(validated_files)
-            ]
+            timestamp=datetime.now(),
+            processing_time=total_time,
+            objects=objects,
+            persons=persons,
+            total_objects=len(objects),
+            lost_objects=lost_count,
+            suspect_objects=suspect_count,
+            image_info=img_info,
+            model_used=model_name
         )
         
-        logger.info(
-            f"✅ Batch terminé {batch_id}: {len(successful_results)}/{len(files)} succès, "
-            f"{total_objects} objets détectés"
-        )
+        # Log des résultats
+        logger.info(f"Détection terminée: {len(objects)} objets, {len(persons)} personnes, "
+                   f"{len(alerts)} alertes en {total_time:.1f}ms")
         
-        return batch_response
+        if alerts:
+            logger.warning(f"🚨 {len(alerts)} alertes générées!")
+            for alert in alerts:
+                logger.warning(f"  - {alert.message}")
+        
+        return response
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Erreur batch {batch_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Erreur traitement batch: {str(e)}")
+        logger.error(f"Erreur inattendue dans detect_objects_in_image: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur interne du serveur: {str(e)}"
+        )
 
-@router.post("/preview")
-async def preview_detection(
-    file: UploadFile = File(..., description="Image pour prévisualisation"),
-    confidence_threshold: float = Form(0.3, ge=0.1, le=0.9),
-    max_detections: int = Form(10, gt=0, le=50),
-    image_service: ImageService = Depends(get_image_service)
+@router.post("/image/analyze", response_model=Dict[str, Any])
+async def analyze_image_detailed(
+    request: Request,
+    file: UploadFile = File(...),
+    model_name: Optional[str] = Form("stable_epoch_30"),
+    model_manager: ModelManager = Depends(get_model_manager)
 ):
     """
-    👁️ Prévisualisation rapide de détection
+    🔬 Analyse détaillée d'une image avec métrics avancés
     
-    Version allégée pour prévisualisation en temps réel.
-    Optimisée pour la vitesse avec paramètres réduits.
+    Retourne des informations détaillées sur:
+    - Qualité de l'image
+    - Performance de détection
+    - Analyse spatiale des objets
+    - Recommandations d'optimisation
     """
+    start_time = time.time()
     
     try:
-        # Validation rapide
-        validate_image_file(file)
+        # Validation du fichier
+        if not file.content_type.startswith('image/'):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Type de fichier non supporté: {file.content_type}"
+            )
         
-        # Lecture
+        # Lecture de l'image
         image_data = await file.read()
+        nparr = np.frombuffer(image_data, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
-        # Requête simplifiée pour vitesse
-        detection_request = DetectionRequest(
-            model_name=ModelType.FAST,  # Modèle rapide
-            confidence_threshold=confidence_threshold,
-            detection_mode=DetectionMode.FAST,
-            max_detections=max_detections,
-            enable_lost_detection=False,  # Désactivé pour vitesse
-            return_cropped_objects=False
-        )
+        if image is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Impossible de décoder l'image"
+            )
         
-        # Traitement rapide
-        result = await image_service.detect_objects_in_image(
-            image_data=image_data,
-            request=detection_request
-        )
+        # Analyse de qualité d'image
+        quality_metrics = _analyze_image_quality(image)
         
-        # Réponse simplifiée
+        # Détection avec différents seuils
+        detector = await model_manager.get_detector(model_name)
+        
+        # Test avec différents seuils de confiance
+        confidence_tests = [0.3, 0.5, 0.7, 0.9]
+        detection_results = {}
+        
+        for conf_threshold in confidence_tests:
+            objects, persons, alerts = detector.detect(
+                image,
+                confidence_threshold=conf_threshold,
+                enable_tracking=False,
+                enable_lost_detection=False
+            )
+            
+            detection_results[f"confidence_{conf_threshold}"] = {
+                "objects_count": len(objects),
+                "persons_count": len(persons),
+                "alerts_count": len(alerts),
+                "avg_confidence": np.mean([obj.confidence for obj in objects]) if objects else 0
+            }
+        
+        # Analyse spatiale
+        spatial_analysis = _analyze_spatial_distribution(image, objects if 'objects' in locals() else [])
+        
+        # Recommandations
+        recommendations = _generate_recommendations(quality_metrics, detection_results, spatial_analysis)
+        
+        total_time = (time.time() - start_time) * 1000
+        
         return {
-            "success": result.success,
-            "objects_count": result.total_objects,
-            "processing_time_ms": result.processing_time_ms,
-            "detections": [
-                {
-                    "class_name": d.class_name_fr,
-                    "confidence": round(d.confidence, 2),
-                    "bbox": {
-                        "x1": d.bbox.x1, "y1": d.bbox.y1,
-                        "x2": d.bbox.x2, "y2": d.bbox.y2
-                    }
-                }
-                for d in result.detections
-            ]
+            "success": True,
+            "analysis_time_ms": total_time,
+            "image_quality": quality_metrics,
+            "detection_performance": detection_results,
+            "spatial_analysis": spatial_analysis,
+            "recommendations": recommendations,
+            "model_used": model_name
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"❌ Erreur prévisualisation: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Erreur dans analyze_image_detailed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de l'analyse: {str(e)}"
+        )
 
-# === ENDPOINTS D'INFORMATION ===
-
-@router.get("/formats")
-async def get_supported_formats(
-    image_service: ImageService = Depends(get_image_service)
-):
-    """📋 Retourne les formats d'images supportés"""
+def _analyze_image_quality(image: np.ndarray) -> Dict[str, Any]:
+    """Analyse la qualité d'une image"""
+    h, w = image.shape[:2]
     
-    formats = await image_service.get_supported_formats()
+    # Calcul de la netteté (variance du Laplacien)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+    
+    # Calcul du contraste
+    contrast = gray.std()
+    
+    # Luminosité moyenne
+    brightness = gray.mean()
+    
+    # Distribution des couleurs
+    hist = cv2.calcHist([image], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
+    color_diversity = (hist > 0).sum() / hist.size
+    
+    # Évaluation globale
+    quality_score = 0
+    quality_factors = []
+    
+    if sharpness > 100:
+        quality_score += 25
+        quality_factors.append("✅ Netteté correcte")
+    else:
+        quality_factors.append("⚠️ Image floue détectée")
+    
+    if 50 < brightness < 200:
+        quality_score += 25
+        quality_factors.append("✅ Luminosité correcte")
+    else:
+        quality_factors.append("⚠️ Problème de luminosité")
+    
+    if contrast > 30:
+        quality_score += 25
+        quality_factors.append("✅ Contraste suffisant")
+    else:
+        quality_factors.append("⚠️ Contraste faible")
+    
+    if color_diversity > 0.1:
+        quality_score += 25
+        quality_factors.append("✅ Diversité des couleurs")
+    else:
+        quality_factors.append("⚠️ Image monotone")
     
     return {
-        "supported_formats": formats,
-        "description": "Extensions de fichiers supportées pour l'upload",
-        "max_file_size_mb": 50,
-        "recommended_formats": [".jpg", ".jpeg", ".png"]
+        "resolution": {"width": w, "height": h, "megapixels": (w * h) / 1e6},
+        "sharpness": float(sharpness),
+        "contrast": float(contrast),
+        "brightness": float(brightness),
+        "color_diversity": float(color_diversity),
+        "quality_score": quality_score,
+        "quality_factors": quality_factors,
+        "quality_level": "Excellente" if quality_score >= 75 else 
+                        "Bonne" if quality_score >= 50 else
+                        "Moyenne" if quality_score >= 25 else "Faible"
     }
 
-@router.get("/models")
-async def get_available_models(
-    model_service: ModelService = Depends(get_model_service)
-):
-    """🤖 Retourne les modèles disponibles"""
+def _analyze_spatial_distribution(image: np.ndarray, objects: list) -> Dict[str, Any]:
+    """Analyse la distribution spatiale des objets"""
+    h, w = image.shape[:2]
     
-    try:
-        models_info = []
-        
-        for model_name in ModelType:
-            try:
-                # Informations de base sur le modèle
-                model_info = {
-                    "name": model_name.value,
-                    "display_name": {
-                        "epoch_30": "Champion (Epoch 30)",
-                        "extended": "Étendu (28 classes)",
-                        "fast": "Rapide (Streaming)",
-                        "mobile": "Mobile/Edge"
-                    }.get(model_name.value, model_name.value),
-                    "description": {
-                        "epoch_30": "Modèle champion avec F1=49.86% et Précision=60.73%",
-                        "extended": "Modèle étendu supportant 28 classes d'objets",
-                        "fast": "Modèle optimisé pour streaming temps réel",
-                        "mobile": "Modèle léger pour déploiement mobile/edge"
-                    }.get(model_name.value, "Modèle de détection d'objets"),
-                    "recommended_for": {
-                        "epoch_30": ["general", "accuracy"],
-                        "extended": ["detailed_classification", "batch"],
-                        "fast": ["streaming", "real_time"],
-                        "mobile": ["mobile", "edge", "low_power"]
-                    }.get(model_name.value, ["general"])
-                }
-                
-                models_info.append(model_info)
-                
-            except Exception as e:
-                logger.warning(f"⚠️ Erreur info modèle {model_name}: {e}")
-        
+    if not objects:
         return {
-            "available_models": models_info,
-            "default_model": "epoch_30",
-            "detection_modes": [mode.value for mode in DetectionMode]
+            "objects_count": 0,
+            "coverage": 0,
+            "density": 0,
+            "zones": {"top_left": 0, "top_right": 0, "bottom_left": 0, "bottom_right": 0}
         }
+    
+    # Zones de l'image
+    zones = {"top_left": 0, "top_right": 0, "bottom_left": 0, "bottom_right": 0}
+    total_area = 0
+    
+    for obj in objects:
+        bbox = obj.bounding_box
+        center_x = bbox.x + bbox.width / 2
+        center_y = bbox.y + bbox.height / 2
         
-    except Exception as e:
-        logger.error(f"❌ Erreur récupération modèles: {e}")
-        raise HTTPException(status_code=500, detail="Erreur récupération des modèles")
-
-@router.get("/statistics")
-async def get_detection_statistics(
-    image_service: ImageService = Depends(get_image_service),
-    model_service: ModelService = Depends(get_model_service)
-):
-    """📊 Statistiques des services de détection"""
-    
-    try:
-        image_stats = image_service.get_service_statistics()
-        model_stats = model_service.get_service_statistics()
+        # Classification par zone
+        if center_x < w/2 and center_y < h/2:
+            zones["top_left"] += 1
+        elif center_x >= w/2 and center_y < h/2:
+            zones["top_right"] += 1
+        elif center_x < w/2 and center_y >= h/2:
+            zones["bottom_left"] += 1
+        else:
+            zones["bottom_right"] += 1
         
-        return {
-            "image_service": image_stats,
-            "model_service": model_stats["service_info"],
-            "timestamp": image_stats.get("timestamp", "unknown")
-        }
+        # Aire totale couverte
+        total_area += bbox.area()
+    
+    coverage = (total_area / (w * h)) * 100  # Pourcentage de couverture
+    density = len(objects) / ((w * h) / 1000)  # Objets per 1000 pixels
+    
+    return {
+        "objects_count": len(objects),
+        "coverage_percent": float(coverage),
+        "density": float(density),
+        "zones": zones,
+        "average_object_size": float(total_area / len(objects)) if objects else 0
+    }
+
+def _generate_recommendations(quality_metrics: dict, detection_results: dict, 
+                            spatial_analysis: dict) -> List[str]:
+    """Génère des recommandations d'optimisation"""
+    recommendations = []
+    
+    # Recommandations qualité image
+    if quality_metrics["quality_score"] < 50:
+        recommendations.append("🔧 Améliorer la qualité d'image pour de meilleures détections")
         
-    except Exception as e:
-        logger.error(f"❌ Erreur récupération statistiques: {e}")
-        raise HTTPException(status_code=500, detail="Erreur récupération statistiques")
-
-# === ENDPOINTS DE FICHIERS ===
-
-@router.get("/result/{file_id}")
-async def download_result_file(file_id: str):
-    """📁 Télécharge un fichier de résultat"""
+        if quality_metrics["sharpness"] < 100:
+            recommendations.append("📷 Réduire le flou (stabilisation, mise au point)")
+        
+        if quality_metrics["brightness"] < 50:
+            recommendations.append("💡 Augmenter l'éclairage de la scène")
+        elif quality_metrics["brightness"] > 200:
+            recommendations.append("☀️ Réduire la surexposition")
+        
+        if quality_metrics["contrast"] < 30:
+            recommendations.append("🔆 Améliorer le contraste de l'image")
     
-    settings = get_settings()
-    file_path = settings.TEMP_DIR / "results" / f"{file_id}"
+    # Recommandations seuils détection
+    conf_30 = detection_results.get("confidence_0.3", {})
+    conf_70 = detection_results.get("confidence_0.7", {})
     
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Fichier non trouvé")
+    if conf_30.get("objects_count", 0) > conf_70.get("objects_count", 0) * 2:
+        recommendations.append("⚖️ Considérer un seuil de confiance plus élevé (0.6-0.7)")
     
-    return FileResponse(
-        path=str(file_path),
-        filename=file_path.name,
-        media_type="application/octet-stream"
-    )
-
-# === UTILITAIRES ===
-
-async def cleanup_temp_file(file_path: str, delay: int = 3600):
-    """🧹 Nettoie un fichier temporaire après délai"""
+    if conf_70.get("objects_count", 0) == 0 and conf_30.get("objects_count", 0) > 0:
+        recommendations.append("📉 Considérer un seuil de confiance plus bas (0.4-0.5)")
     
-    await asyncio.sleep(delay)
+    # Recommandations spatiales
+    if spatial_analysis["coverage_percent"] > 50:
+        recommendations.append("📦 Scène dense - considérer un NMS plus agressif")
     
-    try:
-        path = Path(file_path)
-        if path.exists():
-            path.unlink()
-            logger.debug(f"🧹 Fichier temporaire supprimé: {file_path}")
-    except Exception as e:
-        logger.warning(f"⚠️ Erreur suppression fichier temporaire {file_path}: {e}")
-
-# === GESTION D'ERREURS ===
-
-@router.exception_handler(HTTPException)
-async def http_exception_handler(request, exc: HTTPException):
-    """🚨 Gestionnaire d'erreurs HTTP"""
+    if spatial_analysis["density"] < 0.1:
+        recommendations.append("🔍 Scène sparse - vérifier si tous les objets sont détectés")
     
-    error_response = ErrorResponse(
-        error_type="HTTP_ERROR",
-        error_message=exc.detail,
-        error_code=str(exc.status_code)
-    )
+    # Zone analysis
+    zones = spatial_analysis.get("zones", {})
+    max_zone = max(zones.values()) if zones else 0
+    if max_zone > len(zones) * 0.7:  # Plus de 70% dans une zone
+        recommendations.append("⚖️ Objets concentrés dans une zone - vérifier l'angle de caméra")
     
-    return JSONResponse(
-        status_code=exc.status_code,
-        content=error_response.dict()
-    )
-
-@router.exception_handler(Exception)
-async def general_exception_handler(request, exc: Exception):
-    """🚨 Gestionnaire d'erreurs générales"""
-    
-    logger.error(f"❌ Erreur non gérée dans endpoint image: {exc}", exc_info=True)
-    
-    error_response = ErrorResponse(
-        error_type="INTERNAL_ERROR",
-        error_message="Erreur interne du serveur",
-        details={"original_error": str(exc)} if get_settings().DEBUG else None
-    )
-    
-    return JSONResponse(
-        status_code=500,
-        content=error_response.dict()
-    )
-
-# === EXPORTS ===
-__all__ = ["router"]
+    return recommendations if recommendations else ["✅ Configuration optimale détectée"]

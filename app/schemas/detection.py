@@ -1,378 +1,164 @@
-"""
-📋 SCHEMAS - SCHÉMAS PYDANTIC POUR LA DÉTECTION
-=============================================
-Définition des structures de données pour les requêtes et réponses
-
-Schémas inclus:
-- BoundingBox: Coordonnées des objets détectés
-- DetectionResult: Résultat d'une détection
-- LostObjectState: État d'un objet perdu
-- BatchDetectionResult: Résultats de détection en lot
-- StreamMessage: Messages WebSocket
-- PerformanceMetrics: Métriques de performance
-"""
-
+# app/schemas/detection.py
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import List, Optional, Dict, Any, Union
 from enum import Enum
-from pydantic import BaseModel, Field, validator
-import uuid
-
-# === ÉNUMÉRATIONS ===
 
 class ObjectStatus(str, Enum):
-    """🚦 États d'un objet"""
+    """États d'un objet détecté"""
     NORMAL = "normal"           # Objet avec propriétaire
-    SUSPECT = "suspect"         # Surveillance activée
-    LOST = "lost"              # Objet perdu confirmé
-    CRITICAL = "critical"       # Escalade nécessaire
-    RESOLVED = "resolved"       # Objet récupéré/résolu
+    SURVEILLANCE = "surveillance"  # Sous surveillance
+    SUSPECT = "suspect"         # Potentiellement perdu
+    LOST = "lost"              # Confirmé perdu
+    CRITICAL = "critical"       # Critique (longue durée)
+    RESOLVED = "resolved"       # Résolu (récupéré)
 
-class DetectionMode(str, Enum):
-    """🎛️ Modes de détection"""
-    ULTRA_FAST = "ultra_fast"
-    FAST = "fast"
-    BALANCED = "balanced"
-    QUALITY = "quality"
-    BATCH = "batch"
-
-class ModelType(str, Enum):
-    """🤖 Types de modèles"""
-    EPOCH_30 = "epoch_30"
-    EXTENDED = "extended"
-    FAST = "fast"
-    MOBILE = "mobile"
-
-class MessageType(str, Enum):
-    """📨 Types de messages WebSocket"""
-    FRAME = "frame"
-    DETECTION = "detection"
-    STATUS = "status"
-    ERROR = "error"
-    PING = "ping"
-    PONG = "pong"
-
-# === SCHÉMAS DE BASE ===
+class DetectionConfidence(str, Enum):
+    """Niveaux de confiance"""
+    LOW = "low"           # < 0.5
+    MEDIUM = "medium"     # 0.5 - 0.7
+    HIGH = "high"         # 0.7 - 0.9
+    VERY_HIGH = "very_high"  # > 0.9
 
 class BoundingBox(BaseModel):
-    """📐 Coordonnées d'une boîte englobante"""
-    x1: int = Field(..., ge=0, description="Coordonnée X du coin supérieur gauche")
-    y1: int = Field(..., ge=0, description="Coordonnée Y du coin supérieur gauche")
-    x2: int = Field(..., gt=0, description="Coordonnée X du coin inférieur droit")
-    y2: int = Field(..., gt=0, description="Coordonnée Y du coin inférieur droit")
+    """Boîte englobante d'un objet"""
+    x: float = Field(..., description="Position X (top-left)")
+    y: float = Field(..., description="Position Y (top-left)")
+    width: float = Field(..., description="Largeur")
+    height: float = Field(..., description="Hauteur")
     
-    @validator('x2')
-    def x2_must_be_greater_than_x1(cls, v, values):
-        if 'x1' in values and v <= values['x1']:
-            raise ValueError('x2 doit être supérieur à x1')
-        return v
-    
-    @validator('y2')
-    def y2_must_be_greater_than_y1(cls, v, values):
-        if 'y1' in values and v <= values['y1']:
-            raise ValueError('y2 doit être supérieur à y1')
-        return v
-    
-    @property
-    def width(self) -> int:
-        """Largeur de la boîte"""
-        return self.x2 - self.x1
-    
-    @property
-    def height(self) -> int:
-        """Hauteur de la boîte"""
-        return self.y2 - self.y1
-    
-    @property
-    def area(self) -> int:
-        """Surface de la boîte"""
+    def area(self) -> float:
+        """Calcule l'aire de la boîte"""
         return self.width * self.height
     
-    @property
-    def center(self) -> tuple[int, int]:
-        """Centre de la boîte"""
-        return ((self.x1 + self.x2) // 2, (self.y1 + self.y2) // 2)
-    
-    def iou(self, other: 'BoundingBox') -> float:
-        """Calcul IoU avec une autre boîte"""
-        # Intersection
-        x_left = max(self.x1, other.x1)
-        y_top = max(self.y1, other.y1)
-        x_right = min(self.x2, other.x2)
-        y_bottom = min(self.y2, other.y2)
-        
-        if x_right < x_left or y_bottom < y_top:
-            return 0.0
-        
-        intersection_area = (x_right - x_left) * (y_bottom - y_top)
-        union_area = self.area + other.area - intersection_area
-        
-        return intersection_area / union_area if union_area > 0 else 0.0
+    def center(self) -> tuple:
+        """Retourne le centre de la boîte"""
+        return (self.x + self.width/2, self.y + self.height/2)
 
-class DetectionResult(BaseModel):
-    """🎯 Résultat d'une détection d'objet"""
-    
-    # Identification
-    detection_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    object_id: Optional[str] = None  # ID de tracking si objet suivi
-    
-    # Classification
-    class_id: int = Field(..., ge=0, description="ID de la classe détectée")
-    class_name: str = Field(..., description="Nom de la classe en anglais")
-    class_name_fr: str = Field(..., description="Nom de la classe en français")
-    confidence: float = Field(..., ge=0.0, le=1.0, description="Score de confiance")
-    
-    # Localisation
-    bbox: BoundingBox = Field(..., description="Boîte englobante")
-    
-    # Métadonnées
-    model_name: str = Field(..., description="Modèle utilisé pour la détection")
-    timestamp: datetime = Field(default_factory=datetime.now)
-    processing_time_ms: Optional[float] = None
-    
-    # Contexte objet perdu
-    is_lost_candidate: bool = Field(default=False, description="Candidat objet perdu")
-    lost_duration: Optional[int] = Field(default=0, description="Durée abandon en secondes")
-    status: ObjectStatus = Field(default=ObjectStatus.NORMAL)
-    
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
-
-class LostObjectState(BaseModel):
-    """📊 État détaillé d'un objet perdu"""
-    
-    # Identification
+class ObjectDetection(BaseModel):
+    """Détection d'un objet individuel"""
     object_id: str = Field(..., description="ID unique de l'objet")
-    detection_result: DetectionResult
+    class_name: str = Field(..., description="Classe de l'objet")
+    class_name_fr: str = Field(..., description="Nom français de la classe")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confiance de détection")
+    confidence_level: DetectionConfidence = Field(..., description="Niveau de confiance")
+    bounding_box: BoundingBox = Field(..., description="Boîte englobante")
     
-    # Temporal tracking
+    # Métadonnées temporelles
     first_seen: datetime = Field(..., description="Première détection")
     last_seen: datetime = Field(..., description="Dernière détection")
     last_movement: Optional[datetime] = Field(None, description="Dernier mouvement détecté")
-    stationary_duration: int = Field(default=0, description="Durée immobilité (secondes)")
+    duration_stationary: float = Field(0.0, description="Durée immobile (secondes)")
     
-    # Spatial tracking
-    positions_history: List[BoundingBox] = Field(default_factory=list)
-    movement_distance: float = Field(default=0.0, description="Distance parcourue")
+    # État de l'objet
+    status: ObjectStatus = Field(ObjectStatus.NORMAL, description="État actuel")
+    status_reason: str = Field("", description="Raison du statut")
     
-    # Context analysis
-    nearest_person_distance: Optional[float] = None
-    has_owner_nearby: bool = Field(default=False)
-    location_context: Optional[str] = None  # "public_space", "private_area", etc.
+    # Contexte spatial
+    nearest_person_distance: Optional[float] = Field(None, description="Distance personne la plus proche")
+    is_in_public_area: bool = Field(True, description="Dans une zone publique")
+    zone_id: Optional[str] = Field(None, description="ID de la zone")
     
-    # Status and alerts
-    status: ObjectStatus = Field(default=ObjectStatus.NORMAL)
-    alert_level: int = Field(default=0, ge=0, le=5, description="Niveau d'alerte (0-5)")
-    alerts_sent: List[str] = Field(default_factory=list)
-    
-    # Confidence metrics
-    tracking_stability: float = Field(default=1.0, ge=0.0, le=1.0)
-    detection_consistency: float = Field(default=1.0, ge=0.0, le=1.0)
-    
-    @property
-    def total_duration(self) -> int:
-        """Durée totale de surveillance"""
-        return int((self.last_seen - self.first_seen).total_seconds())
-    
-    @property
-    def is_lost(self) -> bool:
-        """Objet considéré comme perdu"""
-        return self.status in [ObjectStatus.LOST, ObjectStatus.CRITICAL]
+    # Tracking
+    track_id: Optional[str] = Field(None, description="ID de suivi")
+    track_confidence: float = Field(1.0, description="Confiance du suivi")
 
-# === SCHÉMAS DE REQUÊTE ===
+class PersonDetection(BaseModel):
+    """Détection d'une personne"""
+    person_id: str = Field(..., description="ID unique de la personne")
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    bounding_box: BoundingBox
+    position: tuple = Field(..., description="Position (x, y)")
+    movement_vector: Optional[tuple] = Field(None, description="Vecteur de mouvement")
+    is_stationary: bool = Field(False, description="Personne immobile")
 
 class DetectionRequest(BaseModel):
-    """📝 Requête de détection"""
-    model_name: ModelType = Field(default=ModelType.EPOCH_30)
-    confidence_threshold: float = Field(default=0.5, ge=0.1, le=0.9)
-    nms_threshold: float = Field(default=0.4, ge=0.1, le=0.9)
-    detection_mode: DetectionMode = Field(default=DetectionMode.BALANCED)
-    max_detections: int = Field(default=100, gt=0, le=500)
-    
-    # Options avancées
-    enable_tracking: bool = Field(default=False)
-    enable_lost_detection: bool = Field(default=False)
-    return_cropped_objects: bool = Field(default=False)
-    
-    # Métadonnées contextuelles
-    location: Optional[str] = None
-    camera_id: Optional[str] = None
-    user_id: Optional[str] = None
-
-class BatchDetectionRequest(BaseModel):
-    """📦 Requête de détection en lot"""
-    detection_params: DetectionRequest = Field(default_factory=DetectionRequest)
-    batch_size: int = Field(default=8, gt=0, le=32)
-    parallel_processing: bool = Field(default=True)
-    return_summary: bool = Field(default=True)
+    """Requête de détection"""
+    model_name: Optional[str] = Field("default", description="Nom du modèle à utiliser")
+    confidence_threshold: Optional[float] = Field(None, ge=0.0, le=1.0)
+    nms_threshold: Optional[float] = Field(None, ge=0.0, le=1.0)
+    max_detections: Optional[int] = Field(None, ge=1, le=100)
+    enable_tracking: bool = Field(True, description="Activer le suivi")
+    enable_lost_detection: bool = Field(True, description="Activer détection objets perdus")
 
 class StreamConfig(BaseModel):
-    """📡 Configuration streaming"""
-    client_id: str = Field(..., description="ID unique du client")
-    detection_params: DetectionRequest = Field(default_factory=DetectionRequest)
-    frame_rate: int = Field(default=30, gt=0, le=60)
-    max_frame_size: int = Field(default=1920*1080*3)  # Full HD RGB
-    enable_lost_object_tracking: bool = Field(default=True)
-    alert_webhooks: List[str] = Field(default_factory=list)
-
-# === SCHÉMAS DE RÉPONSE ===
+    """Configuration du streaming"""
+    fps: int = Field(15, ge=1, le=30, description="Images par seconde")
+    resolution: tuple = Field((640, 480), description="Résolution (width, height)")
+    quality: int = Field(80, ge=10, le=100, description="Qualité JPEG")
+    buffer_size: int = Field(30, description="Taille du buffer")
 
 class DetectionResponse(BaseModel):
-    """✅ Réponse de détection"""
-    success: bool = True
-    detections: List[DetectionResult]
-    processing_time_ms: float
-    model_used: str
-    image_info: Dict[str, Any] = Field(default_factory=dict)
+    """Réponse de détection"""
+    success: bool = Field(..., description="Succès de l'opération")
+    timestamp: datetime = Field(..., description="Timestamp de la détection")
+    processing_time: float = Field(..., description="Temps de traitement (ms)")
+    
+    # Résultats
+    objects: List[ObjectDetection] = Field(default_factory=list)
+    persons: List[PersonDetection] = Field(default_factory=list)
     
     # Statistiques
-    total_objects: int = Field(default=0)
-    lost_objects_count: int = Field(default=0)
+    total_objects: int = Field(0, description="Nombre total d'objets")
+    lost_objects: int = Field(0, description="Nombre d'objets perdus")
+    suspect_objects: int = Field(0, description="Nombres d'objets suspects")
     
-    # Métadonnées
-    timestamp: datetime = Field(default_factory=datetime.now)
-    request_id: Optional[str] = None
+    # Métadonnées de l'image
+    image_info: Dict[str, Any] = Field(default_factory=dict)
+    model_used: str = Field("", description="Modèle utilisé")
 
-class BatchDetectionResponse(BaseModel):
-    """📦 Réponse de détection en lot"""
-    success: bool = True
-    results: List[DetectionResponse]
-    summary: Dict[str, Any] = Field(default_factory=dict)
-    total_processing_time_ms: float
-    batch_size: int
-    failed_items: List[Dict[str, str]] = Field(default_factory=list)
-
-class LostObjectsResponse(BaseModel):
-    """🚨 Réponse objets perdus"""
-    lost_objects: List[LostObjectState]
-    total_count: int
-    new_alerts: List[str] = Field(default_factory=list)
-    resolved_objects: List[str] = Field(default_factory=list)
-    timestamp: datetime = Field(default_factory=datetime.now)
-
-# === SCHÉMAS WEBSOCKET ===
-
-class StreamMessage(BaseModel):
-    """📨 Message WebSocket générique"""
-    type: MessageType
-    timestamp: datetime = Field(default_factory=datetime.now)
-    client_id: str
-    data: Dict[str, Any] = Field(default_factory=dict)
-
-class FrameMessage(StreamMessage):
-    """🖼️ Message frame WebSocket"""
-    type: MessageType = MessageType.FRAME
-    frame_data: str = Field(..., description="Frame encodée en base64")
-    frame_number: int = Field(default=0)
-    frame_timestamp: datetime = Field(default_factory=datetime.now)
-
-class DetectionMessage(StreamMessage):
-    """🎯 Message détection WebSocket"""
-    type: MessageType = MessageType.DETECTION
-    detections: List[DetectionResult]
-    lost_objects: List[LostObjectState] = Field(default_factory=list)
-    processing_time_ms: float
-
-class StatusMessage(StreamMessage):
-    """📊 Message statut WebSocket"""
-    type: MessageType = MessageType.STATUS
-    status: str
-    metrics: Dict[str, Any] = Field(default_factory=dict)
-
-class ErrorMessage(StreamMessage):
-    """❌ Message erreur WebSocket"""
-    type: MessageType = MessageType.ERROR
-    error_code: str
-    error_message: str
-    details: Optional[Dict[str, Any]] = None
-
-# === SCHÉMAS DE MONITORING ===
-
-class PerformanceMetrics(BaseModel):
-    """📊 Métriques de performance"""
+class LostObjectAlert(BaseModel):
+    """Alerte d'objet perdu"""
+    alert_id: str = Field(..., description="ID unique de l'alerte")
+    object_detection: ObjectDetection = Field(..., description="Objet perdu")
+    alert_level: str = Field(..., description="Niveau d'alerte (WARNING, CRITICAL)")
+    message: str = Field(..., description="Message d'alerte")
+    recommended_actions: List[str] = Field(default_factory=list)
+    created_at: datetime = Field(..., description="Création de l'alerte")
     
-    # Métriques générales
-    total_requests: int = 0
-    successful_requests: int = 0
-    failed_requests: int = 0
-    average_response_time_ms: float = 0.0
-    
-    # Métriques par modèle
-    model_stats: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
-    
-    # Métriques système
-    cpu_usage_percent: float = 0.0
-    memory_usage_mb: float = 0.0
-    gpu_usage_percent: float = 0.0
-    gpu_memory_mb: float = 0.0
-    
-    # Métriques détection
-    objects_detected: int = 0
-    lost_objects_tracked: int = 0
-    alerts_generated: int = 0
-    
-    # Timestamp
-    timestamp: datetime = Field(default_factory=datetime.now)
-    uptime_seconds: float = 0.0
+class StreamFrame(BaseModel):
+    """Frame de streaming"""
+    frame_id: str = Field(..., description="ID unique du frame")
+    timestamp: datetime = Field(..., description="Timestamp du frame")
+    detection_result: DetectionResponse = Field(..., description="Résultat de détection")
+    frame_data: Optional[str] = Field(None, description="Données image encodées base64")
+    alerts: List[LostObjectAlert] = Field(default_factory=list)
+
+class StreamStatus(BaseModel):
+    """État du streaming"""
+    client_id: str = Field(..., description="ID du client")
+    is_active: bool = Field(..., description="Stream actif")
+    fps: float = Field(..., description="FPS actuel")
+    frames_processed: int = Field(..., description="Frames traités")
+    alerts_generated: int = Field(..., description="Alertes générées")
+    connected_since: datetime = Field(..., description="Connecté depuis")
+    last_frame: Optional[datetime] = Field(None, description="Dernier frame")
+
+class ModelInfo(BaseModel):
+    """Informations sur un modèle"""
+    name: str = Field(..., description="Nom du modèle")
+    version: str = Field(..., description="Version")
+    num_classes: int = Field(..., description="Nombre de classes")
+    image_size: tuple = Field(..., description="Taille d'image")
+    is_loaded: bool = Field(..., description="Modèle chargé")
+    memory_usage: float = Field(..., description="Usage mémoire (MB)")
+    performance_stats: Dict[str, float] = Field(default_factory=dict)
 
 class HealthStatus(BaseModel):
-    """🏥 État de santé du service"""
-    status: str = "healthy"  # healthy, degraded, unhealthy
-    version: str
-    uptime_seconds: float
-    models_loaded: List[str]
-    gpu_available: bool
-    memory_usage: Dict[str, float]
-    last_check: datetime = Field(default_factory=datetime.now)
-    issues: List[str] = Field(default_factory=list)
+    """État de santé du service"""
+    status: str = Field(..., description="healthy, degraded, unhealthy")
+    timestamp: datetime = Field(..., description="Timestamp du check")
+    models_loaded: List[str] = Field(default_factory=list)
+    gpu_available: bool = Field(..., description="GPU disponible")
+    memory_usage: Dict[str, float] = Field(default_factory=dict)
+    active_streams: int = Field(0, description="Streams actifs")
+    errors: List[str] = Field(default_factory=list)
 
-# === SCHÉMAS D'ERREUR ===
-
-class ErrorResponse(BaseModel):
-    """❌ Réponse d'erreur standardisée"""
-    success: bool = False
-    error_type: str
-    error_message: str
-    error_code: Optional[str] = None
-    details: Optional[Dict[str, Any]] = None
-    timestamp: datetime = Field(default_factory=datetime.now)
-    request_id: Optional[str] = None
-
-# === UTILITAIRES DE VALIDATION ===
-
-def validate_image_format(filename: str) -> bool:
-    """✅ Valide le format d'image"""
-    valid_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}
-    return any(filename.lower().endswith(ext) for ext in valid_extensions)
-
-def validate_video_format(filename: str) -> bool:
-    """✅ Valide le format vidéo"""
-    valid_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv'}
-    return any(filename.lower().endswith(ext) for ext in valid_extensions)
-
-# === EXPORTS ===
-__all__ = [
-    # Énumérations
-    "ObjectStatus", "DetectionMode", "ModelType", "MessageType",
-    
-    # Schémas de base
-    "BoundingBox", "DetectionResult", "LostObjectState",
-    
-    # Schémas de requête
-    "DetectionRequest", "BatchDetectionRequest", "StreamConfig",
-    
-    # Schémas de réponse
-    "DetectionResponse", "BatchDetectionResponse", "LostObjectsResponse",
-    
-    # Schémas WebSocket
-    "StreamMessage", "FrameMessage", "DetectionMessage", 
-    "StatusMessage", "ErrorMessage",
-    
-    # Schémas monitoring
-    "PerformanceMetrics", "HealthStatus", "ErrorResponse",
-    
-    # Utilitaires
-    "validate_image_format", "validate_video_format"
-]
+class ServiceStats(BaseModel):
+    """Statistiques du service"""
+    uptime: float = Field(..., description="Temps de fonctionnement (secondes)")
+    total_detections: int = Field(0, description="Détections totales")
+    total_alerts: int = Field(0, description="Alertes totales")
+    average_processing_time: float = Field(0.0, description="Temps moyen (ms)")
+    models_performance: Dict[str, Dict] = Field(default_factory=dict)
+    resource_usage: Dict[str, float] = Field(default_factory=dict)

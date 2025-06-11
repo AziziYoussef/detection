@@ -1,161 +1,109 @@
-"""
-FastAPI Application Entry Point for Lost Objects Detection Service
-"""
-from fastapi import FastAPI, Request
+# app/main.py
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 import logging
-import time
 from contextlib import asynccontextmanager
 
-from app.api.routes import router as api_router
-from app.api.websocket.stream_handler import websocket_router
+from app.api.routes import router
 from app.core.model_manager import ModelManager
-from app.config.config import config
+from app.config.config import settings
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+# Configuration du logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Global model manager instance
-model_manager = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage application lifecycle"""
-    global model_manager
+    """Gestionnaire de cycle de vie de l'application"""
+    logger.info("🚀 Démarrage du service IA de détection d'objets perdus")
     
-    # Startup
-    logger.info("🚀 Starting Lost Objects Detection Service...")
-    
-    # Initialize model manager
+    # Initialisation du gestionnaire de modèles
     model_manager = ModelManager()
     await model_manager.initialize()
-    
-    # Store in app state for access in routes
     app.state.model_manager = model_manager
     
-    logger.info("✅ Service initialized successfully!")
+    logger.info("✅ Service IA prêt !")
     yield
     
-    # Shutdown
-    logger.info("🛑 Shutting down service...")
-    if model_manager:
-        await model_manager.cleanup()
-    logger.info("✅ Service shutdown complete!")
+    # Nettoyage lors de l'arrêt
+    logger.info("🛑 Arrêt du service IA")
+    await model_manager.cleanup()
 
-# Create FastAPI application
+# Création de l'application FastAPI
 app = FastAPI(
-    title="Lost Objects Detection API",
-    description="AI Service for detecting and tracking lost objects in real-time",
+    title="🔍 Service IA - Détection d'Objets Perdus",
+    description="Service intelligent de détection et surveillance d'objets perdus en temps réel",
     version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
     lifespan=lifespan
 )
 
-# Add middleware
+# Configuration CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["*"],  # En production, spécifier les domaines autorisés
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+# Montage des fichiers statiques
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Add request timing middleware
-@app.middleware("http")
-async def add_process_time_header(request: Request, call_next):
-    start_time = time.time()
-    response = await call_next(request)
-    process_time = time.time() - start_time
-    response.headers["X-Process-Time"] = str(process_time)
-    return response
+# Inclusion des routes
+app.include_router(router, prefix="/api/v1")
 
-# Include routers
-app.include_router(api_router, prefix="/api/v1")
-app.include_router(websocket_router, prefix="/ws")
-
-# Health check endpoint
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "service": "lost-objects-detection",
-        "version": "1.0.0",
-        "timestamp": time.time()
-    }
-
-# Service statistics endpoint
-@app.get("/stats")
-async def get_stats():
-    """Get service statistics"""
-    if hasattr(app.state, 'model_manager'):
-        stats = await app.state.model_manager.get_stats()
-        return {
-            "service_stats": stats,
-            "timestamp": time.time()
-        }
-    return {"error": "Service not initialized"}
-
-# Models info endpoint
-@app.get("/api/v1/models")
-async def get_models():
-    """Get available models information"""
-    if hasattr(app.state, 'model_manager'):
-        models = await app.state.model_manager.get_available_models()
-        return {
-            "available_models": models,
-            "timestamp": time.time()
-        }
-    return {"error": "Service not initialized"}
-
-# Global exception handler
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Global exception: {exc}", exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": "Internal server error",
-            "message": str(exc) if config.get('debug', False) else "An error occurred"
-        }
-    )
-
-# Root endpoint
+# Routes de base
 @app.get("/")
 async def root():
-    """Root endpoint with service information"""
+    """Page d'accueil du service"""
     return {
-        "service": "Lost Objects Detection API",
+        "service": "🔍 Détection d'Objets Perdus",
         "version": "1.0.0",
-        "status": "running",
-        "docs": "/docs",
-        "health": "/health",
-        "stats": "/stats",
+        "status": "✅ Actif",
         "endpoints": {
-            "image_detection": "POST /api/v1/detect/image",
-            "video_detection": "POST /api/v1/detect/video", 
-            "batch_detection": "POST /api/v1/detect/batch",
-            "stream_detection": "WS /ws/stream/{client_id}",
-            "models": "GET /api/v1/models"
+            "health": "/health",
+            "docs": "/docs",
+            "detection": "/api/v1/detect/",
+            "streaming": "/ws/stream/{client_id}"
         }
     }
+
+@app.get("/health")
+async def health_check():
+    """Vérification de santé du service"""
+    try:
+        model_manager = app.state.model_manager
+        model_status = await model_manager.get_health_status()
+        
+        return {
+            "status": "healthy",
+            "timestamp": model_status.get("timestamp"),
+            "models": model_status.get("models_loaded"),
+            "gpu_available": model_status.get("gpu_available"),
+            "memory_usage": model_status.get("memory_usage")
+        }
+    except Exception as e:
+        logger.error(f"Erreur health check: {e}")
+        raise HTTPException(status_code=500, detail="Service indisponible")
+
+@app.get("/stats")
+async def get_stats():
+    """Statistiques du service"""
+    try:
+        model_manager = app.state.model_manager
+        stats = await model_manager.get_stats()
+        return stats
+    except Exception as e:
+        logger.error(f"Erreur récupération stats: {e}")
+        raise HTTPException(status_code=500, detail="Erreur stats")
 
 if __name__ == "__main__":
     uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
+        "main:app",
+        host=settings.HOST,
+        port=settings.PORT,
+        reload=settings.DEBUG,
         log_level="info"
     )

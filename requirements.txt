@@ -1,123 +1,86 @@
-# Lost Objects Detection Service - Python Dependencies
+# requirements.txt
+# Service IA - Détection d'Objets Perdus
 
-# Core Web Framework
+# === FRAMEWORK WEB ===
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 python-multipart==0.0.6
 websockets==12.0
 
-# HTTP Client for testing and external requests  
-aiohttp==3.9.1
-httpx==0.25.2
-requests==2.31.0
-
-# Deep Learning and Computer Vision
+# === MACHINE LEARNING ===
 torch==2.1.0
 torchvision==0.16.0
+numpy==1.24.3
+
+# === VISION PAR ORDINATEUR ===
 opencv-python==4.8.1.78
-pillow==10.1.0
-numpy==1.24.4
+Pillow==10.0.1
 
-# Data Processing and Analysis
-pandas==2.1.3
-scikit-learn==1.3.2
-scipy==1.11.4
+# === VALIDATION ET SCHEMAS ===
+pydantic==2.4.2
+pydantic-settings==2.0.3
 
-# Pydantic for data validation
-pydantic==2.5.0
-pydantic-settings==2.1.0
-
-# Async and Concurrency
-asyncio-mqtt==0.13.0
+# === ASYNC ET CONCURRENCE ===
+asyncio==3.4.3
 aiofiles==23.2.1
 
-# System Monitoring and Performance
+# === UTILITAIRES ===
+python-dotenv==1.0.0
+pathlib==1.0.1
+uuid==1.30
+logging==0.4.9.6
+
+# === MONITORING ET PERFORMANCE ===
 psutil==5.9.6
 GPUtil==1.4.0
 
-# Image Processing and Utilities
-imageio==2.31.6
-matplotlib==3.8.2
-seaborn==0.13.0
+# === TRAITEMENT DE DONNEES ===
+pandas==2.1.1
+scipy==1.11.3
 
-# Logging and Configuration
-python-json-logger==2.0.7
-PyYAML==6.0.1
-python-dotenv==1.0.0
-
-# Database and Caching (Optional)
-redis==5.0.1
-sqlite3  # Built-in to Python
-sqlalchemy==2.0.23
-
-# Testing Framework
-pytest==7.4.3
+# === TESTS ===
+pytest==7.4.2
 pytest-asyncio==0.21.1
-pytest-cov==4.1.0
-pytest-mock==3.12.0
+httpx==0.25.0
 
-# Development Tools
-black==23.11.0
+# === DÉVELOPPEMENT ===
+black==23.9.1
 flake8==6.1.0
-isort==5.12.0
-mypy==1.7.1
+mypy==1.6.1
 
-# API Documentation
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
+# === OPTIONNEL - BASES DE DONNÉES ===
+# sqlalchemy==2.0.21
+# alembic==1.12.0
+# psycopg2-binary==2.9.7  # PostgreSQL
+# redis==5.0.0  # Cache
 
-# File Handling
-python-magic==0.4.27
-zipfile36==0.1.3
+# === OPTIONNEL - MONITORING AVANCÉ ===
+# prometheus-client==0.17.1
+# elastic-apm==6.18.1
 
-# Time and Date Utilities
-python-dateutil==2.8.2
-pytz==2023.3
+# === OPTIONNEL - DÉPLOIEMENT ===
+# gunicorn==21.2.0
+# docker==6.1.3
 
-# Progress Bars and CLI
-tqdm==4.66.1
-click==8.1.7
-rich==13.7.0
+# === OPTIONNEL - SÉCURITÉ ===
+# python-jose[cryptography]==3.3.0
+# passlib[bcrypt]==1.7.4
 
-# Video Processing
-imageio-ffmpeg==0.4.9
-
-# Model Optimization (Optional)
-onnx==1.15.0
-onnxruntime==1.16.3
-
-# Deployment and Production
-gunicorn==21.2.0
-prometheus-client==0.19.0
-
-# Memory Profiling and Debugging (Development)
-memory-profiler==0.61.0
-line-profiler==4.1.1
-
-# Additional Utilities
-humanize==4.8.0
-pathlib2==2.3.7
-typing-extensions==4.8.0
-
-# Security
-cryptography==41.0.8
-certifi==2023.11.17
-
-# Development Dependencies (Optional)
-jupyter==1.0.0
-notebook==7.0.6
-ipywidgets==8.1.1
-
-# GPU Acceleration (Optional - install based on system)
-# For CUDA 11.8 (adjust based on your CUDA version)
-# torch==2.1.0+cu118 --index-url https://download.pytorch.org/whl/cu118
-# torchvision==0.16.0+cu118 --index-url https://download.pytorch.org/whl/cu118
-
-# For CPU-only deployment, use:
-# torch==2.1.0+cpu --index-url https://download.pytorch.org/whl/cpu
-# torchvision==0.16.0+cpu --index-url https://download.pytorch.org/whl/cpu
-
-# Alternative lightweight versions for edge deployment
-# torch==2.1.0  # Standard CPU version
-# torchvision==0.16.0
-# opencv-python-headless==4.8.1.78  # Headless version without GUI dependencies
+# === NOTES D'INSTALLATION ===
+# 
+# Installation de base:
+# pip install -r requirements.txt
+#
+# Installation avec GPU (CUDA):
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# 
+# Installation pour développement:
+# pip install -r requirements.txt
+# pip install pytest pytest-asyncio httpx black flake8 mypy
+#
+# Installation production:
+# pip install -r requirements.txt
+# pip install gunicorn prometheus-client
+#
+# Vérification GPU:
+# python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"

@@ -1,696 +1,299 @@
-"""
-📐 BOX UTILS - UTILITAIRES POUR MANIPULATION DES BOUNDING BOXES
-=============================================================
-Fonctions utilitaires pour traitement des boîtes englobantes
-
-Fonctionnalités:
-- Conversion entre formats (xyxy, xywh, cxcywh)
-- Calculs IoU et distances
-- Non-Maximum Suppression (NMS)
-- Décodage des prédictions
-- Filtrage et validation
-- Transformations géométriques
-- Clustering de boîtes
-"""
-
-import logging
-from typing import List, Tuple, Union, Optional, Dict, Any
-import math
-
+# app/utils/box_utils.py
 import numpy as np
 import torch
-import torch.nn.functional as F
-from scipy.spatial.distance import cdist
-from scipy.cluster.hierarchy import fcluster, linkage
+from typing import List, Tuple, Union
+from app.schemas.detection import BoundingBox
 
-logger = logging.getLogger(__name__)
-
-# === CLASSES DE BASE ===
-
-class BoundingBox:
-    """📐 Classe représentant une bounding box"""
+def box_iou(box1: np.ndarray, box2: np.ndarray) -> float:
+    """
+    Calcule l'IoU entre deux boîtes
     
-    def __init__(self, x1: float, y1: float, x2: float, y2: float):
-        self.x1 = float(x1)
-        self.y1 = float(y1) 
-        self.x2 = float(x2)
-        self.y2 = float(y2)
+    Args:
+        box1: [x1, y1, x2, y2]
+        box2: [x1, y1, x2, y2]
         
-        # Validation
-        if self.x2 <= self.x1 or self.y2 <= self.y1:
-            raise ValueError(f"Boîte invalide: ({x1}, {y1}, {x2}, {y2})")
+    Returns:
+        IoU score
+    """
+    # Coordonnées de l'intersection
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
     
-    @property
-    def width(self) -> float:
-        return self.x2 - self.x1
+    # Aire de l'intersection
+    intersection = max(0, x2 - x1) * max(0, y2 - y1)
     
-    @property
-    def height(self) -> float:
-        return self.y2 - self.y1
+    # Aires des boîtes
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
     
-    @property
-    def area(self) -> float:
-        return self.width * self.height
+    # Union
+    union = area1 + area2 - intersection
     
-    @property
-    def center(self) -> Tuple[float, float]:
-        return ((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2)
-    
-    @property
-    def aspect_ratio(self) -> float:
-        return self.width / self.height
-    
-    def to_xyxy(self) -> Tuple[float, float, float, float]:
-        """Retourne format (x1, y1, x2, y2)"""
-        return (self.x1, self.y1, self.x2, self.y2)
-    
-    def to_xywh(self) -> Tuple[float, float, float, float]:
-        """Retourne format (x, y, w, h)"""
-        return (self.x1, self.y1, self.width, self.height)
-    
-    def to_cxcywh(self) -> Tuple[float, float, float, float]:
-        """Retourne format (cx, cy, w, h)"""
-        cx, cy = self.center
-        return (cx, cy, self.width, self.height)
-    
-    def scale(self, scale_x: float, scale_y: float = None) -> 'BoundingBox':
-        """Redimensionne la boîte"""
-        if scale_y is None:
-            scale_y = scale_x
-        
-        return BoundingBox(
-            self.x1 * scale_x,
-            self.y1 * scale_y,
-            self.x2 * scale_x,
-            self.y2 * scale_y
-        )
-    
-    def translate(self, dx: float, dy: float) -> 'BoundingBox':
-        """Translate la boîte"""
-        return BoundingBox(
-            self.x1 + dx,
-            self.y1 + dy,
-            self.x2 + dx,
-            self.y2 + dy
-        )
-    
-    def clip_to_image(self, image_width: int, image_height: int) -> 'BoundingBox':
-        """Clip la boîte aux dimensions de l'image"""
-        return BoundingBox(
-            max(0, min(self.x1, image_width)),
-            max(0, min(self.y1, image_height)),
-            max(0, min(self.x2, image_width)),
-            max(0, min(self.y2, image_height))
-        )
-    
-    def expand(self, margin: float) -> 'BoundingBox':
-        """Élargit la boîte avec une marge"""
-        return BoundingBox(
-            self.x1 - margin,
-            self.y1 - margin,
-            self.x2 + margin,
-            self.y2 + margin
-        )
-    
-    def iou(self, other: 'BoundingBox') -> float:
-        """Calcule l'IoU avec une autre boîte"""
-        return calculate_iou_boxes(self, other)
-    
-    def __repr__(self) -> str:
-        return f"BoundingBox({self.x1:.1f}, {self.y1:.1f}, {self.x2:.1f}, {self.y2:.1f})"
-
-# === CONVERSION DE FORMATS ===
-
-def xyxy_to_xywh(boxes: Union[torch.Tensor, np.ndarray, List]) -> Union[torch.Tensor, np.ndarray, List]:
-    """🔄 Convertit (x1, y1, x2, y2) → (x, y, w, h)"""
-    
-    if isinstance(boxes, torch.Tensor):
-        converted = boxes.clone()
-        converted[..., 2] = boxes[..., 2] - boxes[..., 0]  # w = x2 - x1
-        converted[..., 3] = boxes[..., 3] - boxes[..., 1]  # h = y2 - y1
-        return converted
-    
-    elif isinstance(boxes, np.ndarray):
-        converted = boxes.copy()
-        converted[..., 2] = boxes[..., 2] - boxes[..., 0]
-        converted[..., 3] = boxes[..., 3] - boxes[..., 1]
-        return converted
-    
-    elif isinstance(boxes, list):
-        return [[x1, y1, x2-x1, y2-y1] for x1, y1, x2, y2 in boxes]
-    
-    else:
-        raise ValueError(f"Type non supporté: {type(boxes)}")
-
-def xywh_to_xyxy(boxes: Union[torch.Tensor, np.ndarray, List]) -> Union[torch.Tensor, np.ndarray, List]:
-    """🔄 Convertit (x, y, w, h) → (x1, y1, x2, y2)"""
-    
-    if isinstance(boxes, torch.Tensor):
-        converted = boxes.clone()
-        converted[..., 2] = boxes[..., 0] + boxes[..., 2]  # x2 = x + w
-        converted[..., 3] = boxes[..., 1] + boxes[..., 3]  # y2 = y + h
-        return converted
-    
-    elif isinstance(boxes, np.ndarray):
-        converted = boxes.copy()
-        converted[..., 2] = boxes[..., 0] + boxes[..., 2]
-        converted[..., 3] = boxes[..., 1] + boxes[..., 3]
-        return converted
-    
-    elif isinstance(boxes, list):
-        return [[x, y, x+w, y+h] for x, y, w, h in boxes]
-    
-    else:
-        raise ValueError(f"Type non supporté: {type(boxes)}")
-
-def xyxy_to_cxcywh(boxes: Union[torch.Tensor, np.ndarray]) -> Union[torch.Tensor, np.ndarray]:
-    """🔄 Convertit (x1, y1, x2, y2) → (cx, cy, w, h)"""
-    
-    if isinstance(boxes, torch.Tensor):
-        converted = torch.zeros_like(boxes)
-        converted[..., 0] = (boxes[..., 0] + boxes[..., 2]) / 2  # cx
-        converted[..., 1] = (boxes[..., 1] + boxes[..., 3]) / 2  # cy
-        converted[..., 2] = boxes[..., 2] - boxes[..., 0]        # w
-        converted[..., 3] = boxes[..., 3] - boxes[..., 1]        # h
-        return converted
-    
-    elif isinstance(boxes, np.ndarray):
-        converted = np.zeros_like(boxes)
-        converted[..., 0] = (boxes[..., 0] + boxes[..., 2]) / 2
-        converted[..., 1] = (boxes[..., 1] + boxes[..., 3]) / 2
-        converted[..., 2] = boxes[..., 2] - boxes[..., 0]
-        converted[..., 3] = boxes[..., 3] - boxes[..., 1]
-        return converted
-    
-    else:
-        raise ValueError(f"Type non supporté: {type(boxes)}")
-
-def cxcywh_to_xyxy(boxes: Union[torch.Tensor, np.ndarray]) -> Union[torch.Tensor, np.ndarray]:
-    """🔄 Convertit (cx, cy, w, h) → (x1, y1, x2, y2)"""
-    
-    if isinstance(boxes, torch.Tensor):
-        converted = torch.zeros_like(boxes)
-        converted[..., 0] = boxes[..., 0] - boxes[..., 2] / 2  # x1
-        converted[..., 1] = boxes[..., 1] - boxes[..., 3] / 2  # y1
-        converted[..., 2] = boxes[..., 0] + boxes[..., 2] / 2  # x2
-        converted[..., 3] = boxes[..., 1] + boxes[..., 3] / 2  # y2
-        return converted
-    
-    elif isinstance(boxes, np.ndarray):
-        converted = np.zeros_like(boxes)
-        converted[..., 0] = boxes[..., 0] - boxes[..., 2] / 2
-        converted[..., 1] = boxes[..., 1] - boxes[..., 3] / 2
-        converted[..., 2] = boxes[..., 0] + boxes[..., 2] / 2
-        converted[..., 3] = boxes[..., 1] + boxes[..., 3] / 2
-        return converted
-    
-    else:
-        raise ValueError(f"Type non supporté: {type(boxes)}")
-
-# === CALCULS IoU ET DISTANCES ===
-
-def calculate_iou_boxes(box1: BoundingBox, box2: BoundingBox) -> float:
-    """📊 Calcule l'IoU entre deux BoundingBox"""
-    
-    # Intersection
-    x_left = max(box1.x1, box2.x1)
-    y_top = max(box1.y1, box2.y1)
-    x_right = min(box1.x2, box2.x2)
-    y_bottom = min(box1.y2, box2.y2)
-    
-    if x_right < x_left or y_bottom < y_top:
+    if union == 0:
         return 0.0
     
-    intersection_area = (x_right - x_left) * (y_bottom - y_top)
-    union_area = box1.area + box2.area - intersection_area
-    
-    return intersection_area / union_area if union_area > 0 else 0.0
+    return intersection / union
 
-def calculate_iou_tensor(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
-    """📊 Calcule l'IoU entre tensors de boîtes (format xyxy)"""
+def boxes_iou(boxes1: np.ndarray, boxes2: np.ndarray) -> np.ndarray:
+    """
+    Calcule l'IoU entre deux ensembles de boîtes
     
-    # Intersection
-    lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # left-top
-    rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # right-bottom
+    Args:
+        boxes1: [N, 4] array de boîtes
+        boxes2: [M, 4] array de boîtes
+        
+    Returns:
+        [N, M] array d'IoU scores
+    """
+    N, M = len(boxes1), len(boxes2)
+    ious = np.zeros((N, M))
     
-    wh = (rb - lt).clamp(min=0)  # width-height
-    intersection = wh[:, :, 0] * wh[:, :, 1]  # intersection area
+    for i in range(N):
+        for j in range(M):
+            ious[i, j] = box_iou(boxes1[i], boxes2[j])
     
-    # Union
-    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
-    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
-    union = area1[:, None] + area2 - intersection
-    
-    iou = intersection / union.clamp(min=1e-8)
-    return iou
+    return ious
 
-def calculate_giou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
-    """📊 Calcule le GIoU (Generalized IoU)"""
+def non_max_suppression(detections: np.ndarray, iou_threshold: float = 0.5) -> np.ndarray:
+    """
+    Applique Non-Maximum Suppression
     
-    # IoU standard
-    iou = calculate_iou_tensor(boxes1, boxes2)
+    Args:
+        detections: [N, 6] array (x1, y1, x2, y2, conf, class)
+        iou_threshold: Seuil IoU pour suppression
+        
+    Returns:
+        Indices des détections conservées
+    """
+    if len(detections) == 0:
+        return np.array([], dtype=int)
     
-    # Plus petite boîte englobante
-    lt = torch.min(boxes1[:, None, :2], boxes2[:, :2])
-    rb = torch.max(boxes1[:, None, 2:], boxes2[:, 2:])
-    
-    wh = (rb - lt).clamp(min=0)
-    enclosing_area = wh[:, :, 0] * wh[:, :, 1]
-    
-    # Union
-    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
-    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
-    union = area1[:, None] + area2 - iou * area1[:, None]
-    
-    # GIoU
-    giou = iou - (enclosing_area - union) / enclosing_area.clamp(min=1e-8)
-    return giou
-
-def calculate_center_distance(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
-    """📐 Calcule la distance entre centres des boîtes"""
-    
-    # Centres
-    centers1 = (boxes1[:, :2] + boxes1[:, 2:]) / 2
-    centers2 = (boxes2[:, :2] + boxes2[:, 2:]) / 2
-    
-    # Distance euclidienne
-    distances = torch.cdist(centers1, centers2, p=2)
-    return distances
-
-# === NON-MAXIMUM SUPPRESSION ===
-
-def nms_torch(
-    boxes: torch.Tensor,
-    scores: torch.Tensor,
-    iou_threshold: float = 0.5,
-    score_threshold: float = 0.05
-) -> torch.Tensor:
-    """🎯 Non-Maximum Suppression optimisé PyTorch"""
-    
-    # Filtrage par score
-    valid_mask = scores > score_threshold
-    boxes = boxes[valid_mask]
-    scores = scores[valid_mask]
-    
-    if len(boxes) == 0:
-        return torch.empty(0, dtype=torch.long)
-    
-    # Tri par score décroissant
-    sorted_indices = torch.argsort(scores, descending=True)
-    
+    # Tri par confiance décroissante
+    indices = np.argsort(detections[:, 4])[::-1]
     keep = []
-    while len(sorted_indices) > 0:
-        # Garder la boîte avec le meilleur score
-        current = sorted_indices[0]
-        keep.append(current)
-        
-        if len(sorted_indices) == 1:
-            break
-        
-        # Calculer IoU avec les autres boîtes
-        current_box = boxes[current:current+1]
-        other_boxes = boxes[sorted_indices[1:]]
-        
-        ious = calculate_iou_tensor(current_box, other_boxes).squeeze(0)
-        
-        # Garder les boîtes avec IoU < seuil
-        mask = ious < iou_threshold
-        sorted_indices = sorted_indices[1:][mask]
-    
-    return torch.tensor(keep, dtype=torch.long)
-
-def soft_nms(
-    boxes: torch.Tensor,
-    scores: torch.Tensor,
-    iou_threshold: float = 0.5,
-    sigma: float = 0.5,
-    score_threshold: float = 0.001
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """🎯 Soft Non-Maximum Suppression"""
-    
-    device = boxes.device
-    
-    # Conversion en numpy pour traitement
-    boxes_np = boxes.cpu().numpy()
-    scores_np = scores.cpu().numpy()
-    
-    # Indices triés par score
-    indices = np.argsort(scores_np)[::-1]
-    
-    keep_indices = []
-    keep_scores = []
     
     while len(indices) > 0:
-        # Meilleure boîte
-        best_idx = indices[0]
-        keep_indices.append(best_idx)
-        keep_scores.append(scores_np[best_idx])
+        # Garde la boîte avec la plus haute confiance
+        current = indices[0]
+        keep.append(current)
         
         if len(indices) == 1:
             break
         
-        # Calcul IoU avec les autres
-        best_box = boxes_np[best_idx:best_idx+1]
-        other_boxes = boxes_np[indices[1:]]
+        # Calcule IoU avec les autres boîtes
+        current_box = detections[current, :4]
+        other_boxes = detections[indices[1:], :4]
         
-        # IoU calculation (simplified for numpy)
-        x1 = np.maximum(best_box[0, 0], other_boxes[:, 0])
-        y1 = np.maximum(best_box[0, 1], other_boxes[:, 1])
-        x2 = np.minimum(best_box[0, 2], other_boxes[:, 2])
-        y2 = np.minimum(best_box[0, 3], other_boxes[:, 3])
+        ious = np.array([box_iou(current_box, box) for box in other_boxes])
         
-        intersection = np.maximum(0, x2 - x1) * np.maximum(0, y2 - y1)
+        # Garde seulement les boîtes avec IoU < seuil
+        indices = indices[1:][ious < iou_threshold]
+    
+    return np.array(keep)
+
+def nms_by_class(detections: np.ndarray, iou_threshold: float = 0.5) -> np.ndarray:
+    """
+    Applique NMS par classe séparément
+    
+    Args:
+        detections: [N, 6] array (x1, y1, x2, y2, conf, class)
+        iou_threshold: Seuil IoU
         
-        area_best = (best_box[0, 2] - best_box[0, 0]) * (best_box[0, 3] - best_box[0, 1])
-        area_others = (other_boxes[:, 2] - other_boxes[:, 0]) * (other_boxes[:, 3] - other_boxes[:, 1])
+    Returns:
+        Détections filtrées
+    """
+    if len(detections) == 0:
+        return detections
+    
+    keep_indices = []
+    unique_classes = np.unique(detections[:, 5])
+    
+    for cls in unique_classes:
+        # Filtre par classe
+        class_mask = detections[:, 5] == cls
+        class_detections = detections[class_mask]
+        class_indices = np.where(class_mask)[0]
         
-        union = area_best + area_others - intersection
-        ious = intersection / (union + 1e-8)
+        # Applique NMS sur cette classe
+        keep_class = non_max_suppression(class_detections, iou_threshold)
         
-        # Soft suppression
-        weights = np.exp(-(ious ** 2) / sigma)
-        scores_np[indices[1:]] *= weights
-        
-        # Garder les boîtes au-dessus du seuil
-        valid_mask = scores_np[indices[1:]] > score_threshold
-        indices = indices[1:][valid_mask]
+        # Ajoute les indices originaux
+        keep_indices.extend(class_indices[keep_class])
     
-    keep_indices = torch.tensor(keep_indices, device=device)
-    keep_scores = torch.tensor(keep_scores, device=device)
-    
-    return keep_indices, keep_scores
+    return detections[keep_indices]
 
-def class_agnostic_nms(
-    boxes: torch.Tensor,
-    scores: torch.Tensor,
-    class_ids: torch.Tensor,
-    iou_threshold: float = 0.5,
-    score_threshold: float = 0.05
-) -> Dict[int, torch.Tensor]:
-    """🎯 NMS par classe"""
+def filter_by_confidence(detections: np.ndarray, threshold: float = 0.5) -> np.ndarray:
+    """Filtre les détections par confiance"""
+    if len(detections) == 0:
+        return detections
     
-    unique_classes = torch.unique(class_ids)
-    results = {}
-    
-    for class_id in unique_classes:
-        class_mask = class_ids == class_id
-        class_boxes = boxes[class_mask]
-        class_scores = scores[class_mask]
-        class_indices = torch.where(class_mask)[0]
-        
-        # NMS pour cette classe
-        keep = nms_torch(class_boxes, class_scores, iou_threshold, score_threshold)
-        
-        if len(keep) > 0:
-            results[class_id.item()] = class_indices[keep]
-    
-    return results
+    return detections[detections[:, 4] >= threshold]
 
-# === DÉCODAGE DES PRÉDICTIONS ===
+def filter_by_size(detections: np.ndarray, min_size: int = 10, 
+                  max_size: int = None) -> np.ndarray:
+    """Filtre les détections par taille"""
+    if len(detections) == 0:
+        return detections
+    
+    # Calcule largeur et hauteur
+    widths = detections[:, 2] - detections[:, 0]
+    heights = detections[:, 3] - detections[:, 1]
+    
+    # Filtre par taille minimale
+    size_mask = (widths >= min_size) & (heights >= min_size)
+    
+    # Filtre par taille maximale si spécifiée
+    if max_size is not None:
+        size_mask &= (widths <= max_size) & (heights <= max_size)
+    
+    return detections[size_mask]
 
-def decode_predictions(
-    pred_boxes: torch.Tensor,
-    pred_scores: torch.Tensor,
-    anchors: torch.Tensor,
-    image_size: Tuple[int, int],
-    score_threshold: float = 0.05,
-    nms_threshold: float = 0.5
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """🔓 Décode les prédictions du modèle"""
-    
-    device = pred_boxes.device
-    
-    # Décodage des boîtes
-    decoded_boxes = decode_boxes(pred_boxes, anchors, image_size)
-    
-    # Application sigmoid aux scores si nécessaire
-    if pred_scores.max() > 1.0:
-        pred_scores = torch.sigmoid(pred_scores)
-    
-    # Scores et classes
-    max_scores, class_ids = torch.max(pred_scores, dim=-1)
-    
-    # Filtrage par score
-    valid_mask = max_scores > score_threshold
-    
-    if valid_mask.sum() == 0:
-        empty_tensor = torch.empty(0, 4, device=device)
-        empty_scores = torch.empty(0, device=device)
-        empty_classes = torch.empty(0, device=device, dtype=torch.long)
-        return empty_tensor, empty_scores, empty_classes
-    
-    final_boxes = decoded_boxes[valid_mask]
-    final_scores = max_scores[valid_mask]
-    final_classes = class_ids[valid_mask]
-    
-    # NMS
-    keep = nms_torch(final_boxes, final_scores, nms_threshold)
-    
-    return final_boxes[keep], final_scores[keep], final_classes[keep]
+def clip_boxes(boxes: np.ndarray, img_shape: Tuple[int, int]) -> np.ndarray:
+    """Clipe les boîtes aux limites de l'image"""
+    h, w = img_shape
+    boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, w)  # x1, x2
+    boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, h)  # y1, y2
+    return boxes
 
-def decode_boxes(
-    encoded_boxes: torch.Tensor,
-    anchors: torch.Tensor,
-    image_size: Tuple[int, int]
-) -> torch.Tensor:
-    """🔓 Décode les boîtes encodées"""
+def scale_boxes(boxes: np.ndarray, scale_factor: Union[float, Tuple[float, float]]) -> np.ndarray:
+    """Redimensionne les boîtes selon un facteur d'échelle"""
+    if isinstance(scale_factor, (int, float)):
+        scale_x = scale_y = scale_factor
+    else:
+        scale_x, scale_y = scale_factor
     
-    # Format : [dx, dy, dw, dh] → [x1, y1, x2, y2]
-    
-    # Centres des anchors
-    anchor_centers_x = (anchors[:, 0] + anchors[:, 2]) / 2
-    anchor_centers_y = (anchors[:, 1] + anchors[:, 3]) / 2
-    anchor_widths = anchors[:, 2] - anchors[:, 0]
-    anchor_heights = anchors[:, 3] - anchors[:, 1]
-    
-    # Décodage
-    pred_centers_x = encoded_boxes[:, 0] * anchor_widths + anchor_centers_x
-    pred_centers_y = encoded_boxes[:, 1] * anchor_heights + anchor_centers_y
-    pred_widths = torch.exp(encoded_boxes[:, 2]) * anchor_widths
-    pred_heights = torch.exp(encoded_boxes[:, 3]) * anchor_heights
-    
-    # Conversion en xyxy
-    decoded = torch.zeros_like(encoded_boxes)
-    decoded[:, 0] = pred_centers_x - pred_widths / 2   # x1
-    decoded[:, 1] = pred_centers_y - pred_heights / 2  # y1
-    decoded[:, 2] = pred_centers_x + pred_widths / 2   # x2
-    decoded[:, 3] = pred_centers_y + pred_heights / 2  # y2
-    
-    # Clipping aux dimensions de l'image
-    decoded[:, 0].clamp_(0, image_size[0])
-    decoded[:, 1].clamp_(0, image_size[1])
-    decoded[:, 2].clamp_(0, image_size[0])
-    decoded[:, 3].clamp_(0, image_size[1])
-    
-    return decoded
+    boxes[:, [0, 2]] *= scale_x  # x1, x2
+    boxes[:, [1, 3]] *= scale_y  # y1, y2
+    return boxes
 
-# === FILTRAGE ET VALIDATION ===
+def center_to_corner(boxes: np.ndarray) -> np.ndarray:
+    """Convertit du format (cx, cy, w, h) vers (x1, y1, x2, y2)"""
+    x1 = boxes[:, 0] - boxes[:, 2] / 2
+    y1 = boxes[:, 1] - boxes[:, 3] / 2
+    x2 = boxes[:, 0] + boxes[:, 2] / 2
+    y2 = boxes[:, 1] + boxes[:, 3] / 2
+    
+    return np.stack([x1, y1, x2, y2], axis=1)
 
-def filter_small_boxes(
-    boxes: torch.Tensor,
-    min_area: float = 25.0,
-    min_side: float = 5.0
-) -> torch.Tensor:
-    """🔍 Filtre les boîtes trop petites"""
+def corner_to_center(boxes: np.ndarray) -> np.ndarray:
+    """Convertit du format (x1, y1, x2, y2) vers (cx, cy, w, h)"""
+    cx = (boxes[:, 0] + boxes[:, 2]) / 2
+    cy = (boxes[:, 1] + boxes[:, 3]) / 2
+    w = boxes[:, 2] - boxes[:, 0]
+    h = boxes[:, 3] - boxes[:, 1]
     
-    widths = boxes[:, 2] - boxes[:, 0]
-    heights = boxes[:, 3] - boxes[:, 1]
-    areas = widths * heights
-    
-    valid_mask = (areas >= min_area) & (widths >= min_side) & (heights >= min_side)
-    
-    return torch.where(valid_mask)[0]
+    return np.stack([cx, cy, w, h], axis=1)
 
-def filter_edge_boxes(
-    boxes: torch.Tensor,
-    image_size: Tuple[int, int],
-    margin: float = 10.0
-) -> torch.Tensor:
-    """🔍 Filtre les boîtes trop proches des bords"""
-    
-    img_w, img_h = image_size
-    
-    valid_mask = (
-        (boxes[:, 0] >= margin) &
-        (boxes[:, 1] >= margin) &
-        (boxes[:, 2] <= img_w - margin) &
-        (boxes[:, 3] <= img_h - margin)
-    )
-    
-    return torch.where(valid_mask)[0]
+def box_area(boxes: np.ndarray) -> np.ndarray:
+    """Calcule l'aire des boîtes"""
+    return (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
 
-def validate_boxes(boxes: torch.Tensor) -> torch.Tensor:
-    """✅ Valide la géométrie des boîtes"""
+def box_distance(box1: np.ndarray, box2: np.ndarray, 
+                distance_type: str = 'center') -> float:
+    """
+    Calcule la distance entre deux boîtes
     
-    valid_mask = (
-        (boxes[:, 0] < boxes[:, 2]) &  # x1 < x2
-        (boxes[:, 1] < boxes[:, 3]) &  # y1 < y2
-        (boxes[:, 0] >= 0) &           # x1 >= 0
-        (boxes[:, 1] >= 0) &           # y1 >= 0
-        torch.isfinite(boxes).all(dim=1)  # Pas de NaN/Inf
-    )
+    Args:
+        box1, box2: [x1, y1, x2, y2]
+        distance_type: 'center', 'nearest', 'furthest'
+    """
+    if distance_type == 'center':
+        c1 = [(box1[0] + box1[2]) / 2, (box1[1] + box1[3]) / 2]
+        c2 = [(box2[0] + box2[2]) / 2, (box2[1] + box2[3]) / 2]
+        return np.sqrt((c1[0] - c2[0])**2 + (c1[1] - c2[1])**2)
     
-    return torch.where(valid_mask)[0]
+    elif distance_type == 'nearest':
+        # Distance minimale entre les bords
+        dx = max(0, max(box1[0] - box2[2], box2[0] - box1[2]))
+        dy = max(0, max(box1[1] - box2[3], box2[1] - box1[3]))
+        return np.sqrt(dx**2 + dy**2)
+    
+    elif distance_type == 'furthest':
+        # Distance maximale entre les coins
+        distances = []
+        for i in [0, 2]:
+            for j in [1, 3]:
+                for k in [0, 2]:
+                    for l in [1, 3]:
+                        distances.append(np.sqrt((box1[i] - box2[k])**2 + 
+                                               (box1[j] - box2[l])**2))
+        return max(distances)
+    
+    else:
+        raise ValueError(f"Type de distance inconnu: {distance_type}")
 
-# === CLUSTERING ET GROUPEMENT ===
-
-def cluster_boxes_by_proximity(
-    boxes: List[BoundingBox],
-    distance_threshold: float = 50.0
-) -> List[List[int]]:
-    """🎯 Groupe les boîtes par proximité spatiale"""
-    
-    if len(boxes) <= 1:
-        return [[i] for i in range(len(boxes))]
-    
-    # Extraction des centres
-    centers = np.array([box.center for box in boxes])
-    
-    # Calcul des distances
-    distances = cdist(centers, centers)
-    
-    # Clustering hiérarchique
-    linkage_matrix = linkage(distances, method='single')
-    clusters = fcluster(linkage_matrix, distance_threshold, criterion='distance')
-    
-    # Regroupement par cluster
-    cluster_groups = {}
-    for i, cluster_id in enumerate(clusters):
-        if cluster_id not in cluster_groups:
-            cluster_groups[cluster_id] = []
-        cluster_groups[cluster_id].append(i)
-    
-    return list(cluster_groups.values())
-
-def merge_overlapping_boxes(
-    boxes: List[BoundingBox],
-    iou_threshold: float = 0.3
-) -> List[BoundingBox]:
-    """🔗 Fusionne les boîtes qui se chevauchent"""
-    
-    if len(boxes) <= 1:
-        return boxes
+def merge_overlapping_boxes(detections: np.ndarray, 
+                          iou_threshold: float = 0.7) -> np.ndarray:
+    """Fusionne les boîtes qui se chevauchent beaucoup"""
+    if len(detections) == 0:
+        return detections
     
     merged = []
     used = set()
     
-    for i, box1 in enumerate(boxes):
+    for i, det in enumerate(detections):
         if i in used:
             continue
         
-        # Chercher les boîtes à fusionner
-        to_merge = [box1]
-        used.add(i)
-        
-        for j, box2 in enumerate(boxes[i+1:], i+1):
+        # Trouve toutes les boîtes qui se chevauchent
+        overlapping = [i]
+        for j in range(i + 1, len(detections)):
             if j in used:
                 continue
             
-            if box1.iou(box2) > iou_threshold:
-                to_merge.append(box2)
+            if box_iou(det[:4], detections[j, :4]) > iou_threshold:
+                overlapping.append(j)
                 used.add(j)
         
-        # Fusion des boîtes
-        if len(to_merge) == 1:
-            merged.append(to_merge[0])
+        # Fusionne les boîtes
+        if len(overlapping) == 1:
+            merged.append(det)
         else:
-            # Boîte englobante
-            min_x1 = min(box.x1 for box in to_merge)
-            min_y1 = min(box.y1 for box in to_merge)
-            max_x2 = max(box.x2 for box in to_merge)
-            max_y2 = max(box.y2 for box in to_merge)
+            overlap_dets = detections[overlapping]
             
-            merged.append(BoundingBox(min_x1, min_y1, max_x2, max_y2))
+            # Moyenne pondérée par confiance
+            weights = overlap_dets[:, 4]
+            weights = weights / weights.sum()
+            
+            merged_box = np.average(overlap_dets[:, :4], axis=0, weights=weights)
+            merged_conf = overlap_dets[:, 4].max()  # Confiance maximale
+            merged_class = overlap_dets[np.argmax(overlap_dets[:, 4]), 5]  # Classe de la meilleure
+            
+            merged.append([*merged_box, merged_conf, merged_class])
+        
+        used.add(i)
     
-    return merged
+    return np.array(merged) if merged else np.array([]).reshape(0, 6)
 
-# === UTILITAIRES AVANCÉS ===
+def convert_to_schema(detections: np.ndarray, class_names: List[str]) -> List[BoundingBox]:
+    """Convertit les détections en schémas Pydantic"""
+    boxes = []
+    
+    for det in detections:
+        x1, y1, x2, y2, conf, cls_id = det
+        
+        box = BoundingBox(
+            x=float(x1),
+            y=float(y1),
+            width=float(x2 - x1),
+            height=float(y2 - y1)
+        )
+        boxes.append(box)
+    
+    return boxes
 
-def calculate_box_stability(
-    boxes_history: List[torch.Tensor],
-    window_size: int = 5
-) -> torch.Tensor:
-    """📊 Calcule la stabilité des boîtes dans le temps"""
-    
-    if len(boxes_history) < 2:
-        return torch.ones(len(boxes_history[-1]) if boxes_history else 0)
-    
-    recent_boxes = boxes_history[-window_size:]
-    
-    if len(recent_boxes) < 2:
-        return torch.ones(len(recent_boxes[-1]))
-    
-    # Calcul de la variance des positions
-    all_boxes = torch.stack(recent_boxes)  # [time, num_boxes, 4]
-    
-    # Centres des boîtes
-    centers = (all_boxes[..., :2] + all_boxes[..., 2:]) / 2  # [time, num_boxes, 2]
-    
-    # Variance temporelle
-    center_variance = torch.var(centers, dim=0).sum(dim=-1)  # [num_boxes]
-    
-    # Stabilité = 1 / (1 + variance)
-    stability = 1 / (1 + center_variance)
-    
-    return stability
-
-def apply_nms(
-    boxes: torch.Tensor,
-    scores: torch.Tensor,
-    score_threshold: float = 0.05,
-    nms_threshold: float = 0.5,
-    max_detections: int = 100
-) -> torch.Tensor:
-    """🎯 Application complète du NMS"""
-    
-    # Validation des entrées
+def validate_boxes(boxes: np.ndarray) -> np.ndarray:
+    """Valide et corrige les boîtes invalides"""
     if len(boxes) == 0:
-        return torch.empty(0, dtype=torch.long)
+        return boxes
     
-    # Filtrage par score
-    valid_mask = scores > score_threshold
-    if valid_mask.sum() == 0:
-        return torch.empty(0, dtype=torch.long)
+    # Corrige x1 > x2 ou y1 > y2
+    boxes[:, [0, 2]] = np.sort(boxes[:, [0, 2]], axis=1)
+    boxes[:, [1, 3]] = np.sort(boxes[:, [1, 3]], axis=1)
     
-    valid_boxes = boxes[valid_mask]
-    valid_scores = scores[valid_mask]
-    valid_indices = torch.where(valid_mask)[0]
+    # Supprime les boîtes de taille nulle
+    valid_mask = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
     
-    # NMS
-    keep_relative = nms_torch(valid_boxes, valid_scores, nms_threshold)
-    
-    # Limitation du nombre de détections
-    if len(keep_relative) > max_detections:
-        keep_relative = keep_relative[:max_detections]
-    
-    # Indices absolus
-    keep_absolute = valid_indices[keep_relative]
-    
-    return keep_absolute
-
-# === EXPORTS ===
-__all__ = [
-    # Classes
-    "BoundingBox",
-    
-    # Conversion
-    "xyxy_to_xywh", "xywh_to_xyxy", "xyxy_to_cxcywh", "cxcywh_to_xyxy",
-    
-    # IoU et distances
-    "calculate_iou_boxes", "calculate_iou_tensor", "calculate_giou", "calculate_center_distance",
-    
-    # NMS
-    "nms_torch", "soft_nms", "class_agnostic_nms", "apply_nms",
-    
-    # Décodage
-    "decode_predictions", "decode_boxes",
-    
-    # Filtrage
-    "filter_small_boxes", "filter_edge_boxes", "validate_boxes",
-    
-    # Clustering
-    "cluster_boxes_by_proximity", "merge_overlapping_boxes",
-    
-    # Utilitaires
-    "calculate_box_stability"
-]
+    return boxes[valid_mask]

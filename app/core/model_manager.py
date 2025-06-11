@@ -1,606 +1,348 @@
-"""
-🤖 MODEL MANAGER - GESTIONNAIRE CENTRALISÉ DES MODÈLES
-====================================================
-Gestionnaire intelligent pour charger, cache et optimiser les modèles PyTorch
-
-Fonctionnalités:
-- Chargement lazy et cache LRU des modèles
-- Optimisation GPU/CPU automatique
-- Gestion mémoire intelligente
-- Support multi-modèles simultanés
-- Monitoring des performances
-- Fallback et récupération d'erreurs
-"""
-
-import asyncio
-import time
-import logging
-import threading
-from typing import Dict, List, Optional, Any, Union, Tuple
-from pathlib import Path
-from collections import OrderedDict
-import weakref
-import gc
-
+# app/core/model_manager.py
 import torch
 import torch.nn as nn
-from torch.jit import RecursiveScriptModule
+from pathlib import Path
+import logging
+from typing import Dict, Optional, List
+from datetime import datetime
 import psutil
-import numpy as np
+import gc
+from collections import OrderedDict
+import asyncio
 
-# Imports internes
-from app.config.config import Settings, ModelConfigs
-from app.models.model import (
-    LostObjectDetectionModel, ModelConfig, 
-    create_epoch30_model, create_extended_model, 
-    create_fast_model, create_mobile_model
-)
+from app.config.config import settings, MODEL_CONFIG
+from app.core.detector import ObjectDetector
 
 logger = logging.getLogger(__name__)
 
-class ModelLoadError(Exception):
-    """❌ Erreur lors du chargement d'un modèle"""
-    pass
+class ModelInfo:
+    """Informations sur un modèle"""
+    def __init__(self, name: str, path: Path, config: dict):
+        self.name = name
+        self.path = path
+        self.config = config
+        self.model = None
+        self.detector = None
+        self.is_loaded = False
+        self.load_time = None
+        self.memory_usage = 0
+        self.inference_count = 0
+        self.total_inference_time = 0.0
+        self.last_used = None
 
-class ModelCache:
-    """💾 Cache LRU intelligent pour les modèles"""
-    
+class LRUCache:
+    """Cache LRU pour les modèles"""
     def __init__(self, max_size: int = 3):
         self.max_size = max_size
-        self.cache: OrderedDict = OrderedDict()
-        self.access_times: Dict[str, float] = {}
-        self.memory_usage: Dict[str, float] = {}
-        self._lock = threading.RLock()
+        self.cache = OrderedDict()
     
-    def get(self, key: str) -> Optional[nn.Module]:
-        """Récupère un modèle du cache"""
-        with self._lock:
-            if key in self.cache:
-                # Déplacer en fin pour LRU
-                self.cache.move_to_end(key)
-                self.access_times[key] = time.time()
-                return self.cache[key]
-            return None
+    def get(self, key: str) -> Optional[ModelInfo]:
+        if key in self.cache:
+            # Déplacer à la fin (plus récent)
+            self.cache.move_to_end(key)
+            return self.cache[key]
+        return None
     
-    def put(self, key: str, model: nn.Module, memory_mb: float = 0.0):
-        """Ajoute un modèle au cache"""
-        with self._lock:
-            # Si déjà présent, mettre à jour
-            if key in self.cache:
-                self.cache.move_to_end(key)
-                self.access_times[key] = time.time()
-                self.memory_usage[key] = memory_mb
-                return
-            
-            # Vérifier la taille du cache
-            while len(self.cache) >= self.max_size:
-                self._evict_oldest()
-            
-            # Ajouter le nouveau modèle
-            self.cache[key] = model
-            self.access_times[key] = time.time()
-            self.memory_usage[key] = memory_mb
+    def put(self, key: str, model_info: ModelInfo):
+        if key in self.cache:
+            self.cache.move_to_end(key)
+        else:
+            self.cache[key] = model_info
+            if len(self.cache) > self.max_size:
+                # Supprimer le plus ancien
+                oldest_key, oldest_model = self.cache.popitem(last=False)
+                self._unload_model(oldest_model)
     
-    def _evict_oldest(self):
-        """Éviction du modèle le plus ancien"""
-        if not self.cache:
-            return
-        
-        oldest_key = next(iter(self.cache))
-        evicted_model = self.cache.pop(oldest_key)
-        self.access_times.pop(oldest_key, None)
-        memory_freed = self.memory_usage.pop(oldest_key, 0.0)
-        
-        # Nettoyage mémoire
-        del evicted_model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
-        
-        logger.info(f"💾 Modèle évincé du cache: {oldest_key} ({memory_freed:.1f}MB libérés)")
-    
-    def clear(self):
-        """Vide le cache"""
-        with self._lock:
-            for model in self.cache.values():
-                del model
-            self.cache.clear()
-            self.access_times.clear()
-            self.memory_usage.clear()
-            
+    def _unload_model(self, model_info: ModelInfo):
+        """Décharge un modèle de la mémoire"""
+        if model_info.is_loaded:
+            logger.info(f"Déchargement du modèle {model_info.name}")
+            del model_info.model
+            del model_info.detector
+            model_info.model = None
+            model_info.detector = None
+            model_info.is_loaded = False
+            gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            gc.collect()
+
+class SimpleDetectionModel(nn.Module):
+    """Modèle de détection simple (placeholder pour votre modèle réel)"""
     
-    def get_stats(self) -> Dict[str, Any]:
-        """Statistiques du cache"""
-        with self._lock:
-            total_memory = sum(self.memory_usage.values())
-            return {
-                "size": len(self.cache),
-                "max_size": self.max_size,
-                "total_memory_mb": total_memory,
-                "models": list(self.cache.keys()),
-                "memory_by_model": dict(self.memory_usage)
-            }
+    def __init__(self, num_classes: int = 28, input_size: int = 320):
+        super().__init__()
+        self.num_classes = num_classes
+        self.input_size = input_size
+        
+        # Exemple d'architecture simple (à remplacer par votre modèle)
+        self.backbone = nn.Sequential(
+            nn.Conv2d(3, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(64, 128, 3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((10, 10))
+        )
+        
+        # Tête de détection
+        self.detection_head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128 * 10 * 10, 512),
+            nn.ReLU(),
+            nn.Linear(512, num_classes * 6)  # 6 = x, y, w, h, conf, class
+        )
+    
+    def forward(self, x):
+        features = self.backbone(x)
+        detections = self.detection_head(features)
+        
+        # Reshape pour format détection
+        batch_size = x.size(0)
+        detections = detections.view(batch_size, -1, 6)
+        
+        return detections
 
 class ModelManager:
-    """🤖 Gestionnaire principal des modèles"""
+    """Gestionnaire des modèles de détection"""
     
-    def __init__(self, settings: Settings):
-        self.settings = settings
-        self.device = self._determine_device()
-        
-        # Cache des modèles
-        self.model_cache = ModelCache(max_size=3)
-        
-        # Registre des modèles disponibles
-        self.model_registry = {
-            "epoch_30": {
-                "factory": create_epoch30_model,
-                "config": ModelConfig.get_epoch30_config(),
-                "path": "stable_model_epoch_30.pth",
-                "priority": "high",
-                "description": "Modèle champion F1=49.86%"
-            },
-            "extended": {
-                "factory": create_extended_model,
-                "config": ModelConfig.get_extended_config(),
-                "path": "best_extended_model.pth",
-                "priority": "medium",
-                "description": "Modèle étendu 28 classes"
-            },
-            "fast": {
-                "factory": create_fast_model,
-                "config": ModelConfig.get_fast_config(),
-                "path": "fast_model.pth",
-                "priority": "high",
-                "description": "Modèle optimisé streaming"
-            },
-            "mobile": {
-                "factory": create_mobile_model,
-                "config": ModelConfig.get_mobile_config(),
-                "path": "mobile_model.pth",
-                "priority": "low",
-                "description": "Modèle mobile/edge"
-            }
+    def __init__(self):
+        self.device = self._setup_device()
+        self.models_cache = LRUCache(max_size=3)
+        self.available_models = self._discover_models()
+        self.default_model = settings.DEFAULT_MODEL
+        self.stats = {
+            'total_loads': 0,
+            'total_inferences': 0,
+            'cache_hits': 0,
+            'cache_misses': 0
         }
         
-        # État et métriques
-        self.loading_locks: Dict[str, asyncio.Lock] = {}
-        self.load_times: Dict[str, float] = {}
-        self.inference_counts: Dict[str, int] = {}
-        self.error_counts: Dict[str, int] = {}
-        
-        # Monitoring système
-        self.start_time = time.time()
-        self._last_memory_check = 0
-        self._memory_check_interval = 30  # secondes
-        
-        logger.info(f"🤖 ModelManager initialisé sur {self.device}")
+        logger.info(f"ModelManager initialisé sur {self.device}")
+        logger.info(f"Modèles disponibles: {list(self.available_models.keys())}")
     
-    def _determine_device(self) -> torch.device:
-        """🔧 Détermine le device optimal"""
-        if self.settings.DEVICE == "auto":
-            if torch.cuda.is_available() and self.settings.ENABLE_GPU:
-                device = torch.device("cuda")
-                logger.info(f"🚀 GPU détecté: {torch.cuda.get_device_name()}")
-            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                device = torch.device("mps")
-                logger.info("🍎 Apple Silicon MPS détecté")
-            else:
-                device = torch.device("cpu")
-                logger.info("💻 Utilisation CPU")
+    def _setup_device(self) -> torch.device:
+        """Configure le device (GPU/CPU)"""
+        if settings.USE_GPU and torch.cuda.is_available():
+            device = torch.device('cuda')
+            logger.info(f"GPU détecté: {torch.cuda.get_device_name()}")
+            logger.info(f"Mémoire GPU: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
         else:
-            device = torch.device(self.settings.DEVICE)
+            device = torch.device('cpu')
+            logger.info("Utilisation du CPU")
         
         return device
     
-    async def initialize(self):
-        """🚀 Initialise le gestionnaire"""
-        logger.info("🚀 Initialisation ModelManager...")
+    def _discover_models(self) -> Dict[str, ModelInfo]:
+        """Découvre les modèles disponibles"""
+        models = {}
         
-        # Vérifier la disponibilité des modèles
-        await self._check_model_files()
-        
-        # Initialiser les locks
-        for model_name in self.model_registry.keys():
-            self.loading_locks[model_name] = asyncio.Lock()
-        
-        logger.info("✅ ModelManager initialisé")
-    
-    async def _check_model_files(self):
-        """📂 Vérifie la présence des fichiers de modèles"""
-        missing_models = []
-        
-        for model_name, config in self.model_registry.items():
-            model_path = self.settings.MODELS_DIR / config["path"]
-            
-            if not model_path.exists():
-                missing_models.append(model_name)
-                logger.warning(f"⚠️ Fichier modèle manquant: {model_path}")
-            else:
-                logger.info(f"✅ Modèle trouvé: {model_name} ({model_path})")
-        
-        if missing_models:
-            logger.warning(f"⚠️ Modèles manquants: {missing_models}")
-            logger.info("💡 Exécutez 'python scripts/download_models.py' pour télécharger")
-    
-    async def get_model(self, model_name: str) -> nn.Module:
-        """
-        🎯 Récupère un modèle (avec cache intelligent)
-        
-        Args:
-            model_name: Nom du modèle à charger
-            
-        Returns:
-            Modèle PyTorch prêt pour l'inférence
-        """
-        
-        if model_name not in self.model_registry:
-            raise ModelLoadError(f"Modèle inconnu: {model_name}")
-        
-        # Vérifier le cache
-        cached_model = self.model_cache.get(model_name)
-        if cached_model is not None:
-            logger.debug(f"🎯 Modèle récupéré du cache: {model_name}")
-            return cached_model
-        
-        # Chargement avec lock pour éviter les doublons
-        async with self.loading_locks[model_name]:
-            # Double-check après acquisition du lock
-            cached_model = self.model_cache.get(model_name)
-            if cached_model is not None:
-                return cached_model
-            
-            # Chargement effectif
-            return await self._load_model(model_name)
-    
-    async def _load_model(self, model_name: str) -> nn.Module:
-        """🔄 Charge un modèle depuis le disque"""
-        
-        start_time = time.time()
-        model_config = self.model_registry[model_name]
-        
-        try:
-            logger.info(f"🔄 Chargement modèle: {model_name}")
-            
-            # 1. Créer l'architecture
-            model_factory = model_config["factory"]
-            model = model_factory()
-            
-            # 2. Charger les poids si disponibles
-            model_path = self.settings.MODELS_DIR / model_config["path"]
-            
-            if model_path.exists():
-                logger.debug(f"📂 Chargement poids: {model_path}")
-                
-                # Chargement selon le device
-                if self.device.type == "cuda":
-                    checkpoint = torch.load(model_path, map_location=self.device)
-                else:
-                    checkpoint = torch.load(model_path, map_location="cpu")
-                
-                # Extraction des poids selon le format
-                if isinstance(checkpoint, dict):
-                    if "model_state_dict" in checkpoint:
-                        state_dict = checkpoint["model_state_dict"]
-                    elif "state_dict" in checkpoint:
-                        state_dict = checkpoint["state_dict"]
-                    else:
-                        state_dict = checkpoint
-                else:
-                    state_dict = checkpoint.state_dict() if hasattr(checkpoint, 'state_dict') else checkpoint
-                
-                # Nettoyage des clés si nécessaire
-                state_dict = self._clean_state_dict(state_dict)
-                
-                # Chargement des poids
-                try:
-                    model.load_state_dict(state_dict, strict=False)
-                    logger.debug("✅ Poids chargés avec succès")
-                except Exception as e:
-                    logger.warning(f"⚠️ Chargement partiel des poids: {e}")
-                    # Continuer avec le modèle partiellement chargé
-            else:
-                logger.warning(f"⚠️ Fichier modèle non trouvé: {model_path}")
-                logger.info("💡 Utilisation de l'architecture sans poids pré-entraînés")
-            
-            # 3. Optimisation pour inférence
-            model = await self._optimize_model(model, model_name)
-            
-            # 4. Calcul de l'utilisation mémoire
-            memory_usage = self._estimate_model_memory(model)
-            
-            # 5. Mise en cache
-            self.model_cache.put(model_name, model, memory_usage)
-            
-            # 6. Métriques
-            load_time = time.time() - start_time
-            self.load_times[model_name] = load_time
-            self.inference_counts[model_name] = 0
-            self.error_counts[model_name] = 0
-            
-            logger.info(
-                f"✅ Modèle chargé: {model_name} "
-                f"({load_time:.2f}s, {memory_usage:.1f}MB)"
-            )
-            
-            return model
-            
-        except Exception as e:
-            self.error_counts[model_name] = self.error_counts.get(model_name, 0) + 1
-            logger.error(f"❌ Erreur chargement {model_name}: {e}")
-            raise ModelLoadError(f"Échec chargement {model_name}: {e}")
-    
-    def _clean_state_dict(self, state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """🧹 Nettoie les clés du state_dict"""
-        cleaned = {}
-        
-        for key, value in state_dict.items():
-            # Supprimer les préfixes courants
-            clean_key = key
-            for prefix in ["module.", "model.", "_orig_mod."]:
-                if clean_key.startswith(prefix):
-                    clean_key = clean_key[len(prefix):]
-            
-            cleaned[clean_key] = value
-        
-        return cleaned
-    
-    async def _optimize_model(self, model: nn.Module, model_name: str) -> nn.Module:
-        """⚡ Optimise un modèle pour l'inférence"""
-        
-        # 1. Mode évaluation
-        model.eval()
-        
-        # 2. Déplacement sur device
-        model = model.to(self.device)
-        
-        # 3. Optimisations selon le device
-        if self.device.type == "cuda":
-            # Optimisations CUDA
-            if self.settings.HALF_PRECISION:
-                model = model.half()
-                logger.debug("🔧 FP16 activé")
-            
-            # Optimisations compilation (PyTorch 2.0+)
-            if hasattr(torch, 'compile') and hasattr(model, 'forward'):
-                try:
-                    model = torch.compile(model, mode="reduce-overhead")
-                    logger.debug("🚀 Compilation PyTorch 2.0 activée")
-                except Exception as e:
-                    logger.debug(f"⚠️ Compilation échouée: {e}")
-        
-        # 4. Optimisations générales
-        if hasattr(model, 'fuse_model'):
-            try:
-                model.fuse_model()
-                logger.debug("🔧 Fusion des couches activée")
-            except:
-                pass
-        
-        # 5. Warm-up du modèle
-        await self._warmup_model(model, model_name)
-        
-        return model
-    
-    async def _warmup_model(self, model: nn.Module, model_name: str):
-        """🔥 Pré-chauffe un modèle"""
-        
-        try:
-            # Obtenir la configuration du modèle
-            model_config = self.model_registry[model_name]["config"]
-            input_size = model_config.input_size
-            
-            # Créer un input dummy
-            dummy_input = torch.randn(1, 3, *input_size).to(self.device)
-            
-            if self.settings.HALF_PRECISION and self.device.type == "cuda":
-                dummy_input = dummy_input.half()
-            
-            # Quelques inférences de warm-up
-            with torch.no_grad():
-                for _ in range(3):
-                    _ = model(dummy_input)
-            
-            logger.debug(f"🔥 Modèle pré-chauffé: {model_name}")
-            
-        except Exception as e:
-            logger.debug(f"⚠️ Warm-up échoué pour {model_name}: {e}")
-    
-    def _estimate_model_memory(self, model: nn.Module) -> float:
-        """📊 Estime l'utilisation mémoire d'un modèle"""
-        
-        try:
-            param_size = 0
-            buffer_size = 0
-            
-            for param in model.parameters():
-                param_size += param.nelement() * param.element_size()
-            
-            for buffer in model.buffers():
-                buffer_size += buffer.nelement() * buffer.element_size()
-            
-            total_size = param_size + buffer_size
-            size_mb = total_size / (1024 * 1024)
-            
-            return size_mb
-            
-        except Exception:
-            return 0.0
-    
-    async def load_champion_models(self):
-        """🏆 Pré-charge les modèles prioritaires"""
-        
-        high_priority_models = [
-            name for name, config in self.model_registry.items()
-            if config["priority"] == "high"
-        ]
-        
-        logger.info(f"🏆 Pré-chargement modèles prioritaires: {high_priority_models}")
-        
-        for model_name in high_priority_models:
-            try:
-                await self.get_model(model_name)
-            except Exception as e:
-                logger.error(f"❌ Échec pré-chargement {model_name}: {e}")
-    
-    async def get_model_config(self, model_name: str) -> ModelConfig:
-        """⚙️ Récupère la configuration d'un modèle"""
-        
-        if model_name not in self.model_registry:
-            raise ValueError(f"Modèle inconnu: {model_name}")
-        
-        return self.model_registry[model_name]["config"]
-    
-    def get_available_models(self) -> List[str]:
-        """📋 Liste des modèles disponibles"""
-        return list(self.model_registry.keys())
-    
-    async def get_models_status(self) -> Dict[str, Any]:
-        """📊 État de tous les modèles"""
-        
-        status = {}
-        
-        for model_name, config in self.model_registry.items():
-            model_path = self.settings.MODELS_DIR / config["path"]
-            
-            status[model_name] = {
-                "available": model_path.exists(),
-                "loaded": self.model_cache.get(model_name) is not None,
-                "path": str(model_path),
-                "priority": config["priority"],
-                "description": config["description"],
-                "load_time": self.load_times.get(model_name, 0),
-                "inference_count": self.inference_counts.get(model_name, 0),
-                "error_count": self.error_counts.get(model_name, 0)
+        # Modèles définis dans la configuration
+        model_configs = {
+            'stable_epoch_30': {
+                'file': settings.DEFAULT_MODEL,
+                'description': 'Modèle champion stable (Epoch 30)',
+                'performance': 'high',
+                'speed': 'medium'
+            },
+            'extended_28_classes': {
+                'file': settings.EXTENDED_MODEL,
+                'description': 'Modèle étendu 28 classes',
+                'performance': 'very_high',
+                'speed': 'medium'
+            },
+            'fast_stream': {
+                'file': settings.FAST_MODEL,
+                'description': 'Modèle rapide pour streaming',
+                'performance': 'medium',
+                'speed': 'very_high'
             }
-        
-        return status
-    
-    def get_memory_usage(self) -> Dict[str, Any]:
-        """💾 Utilisation mémoire détaillée"""
-        
-        # Mémoire système
-        process = psutil.Process()
-        system_memory = psutil.virtual_memory()
-        
-        memory_info = {
-            "system_memory_total_gb": system_memory.total / (1024**3),
-            "system_memory_used_gb": system_memory.used / (1024**3),
-            "system_memory_percent": system_memory.percent,
-            "process_memory_mb": process.memory_info().rss / (1024**2),
-            "model_cache_mb": sum(self.model_cache.memory_usage.values())
         }
         
-        # Mémoire GPU si disponible
-        if torch.cuda.is_available():
-            try:
-                gpu_memory = torch.cuda.memory_stats()
-                memory_info.update({
-                    "gpu_memory_allocated_mb": gpu_memory.get("allocated_bytes.all.current", 0) / (1024**2),
-                    "gpu_memory_reserved_mb": gpu_memory.get("reserved_bytes.all.current", 0) / (1024**2),
-                    "gpu_memory_max_mb": torch.cuda.get_device_properties(0).total_memory / (1024**2)
-                })
-            except Exception:
-                pass
+        for name, config in model_configs.items():
+            model_path = settings.MODELS_DIR / config['file']
+            if model_path.exists():
+                models[name] = ModelInfo(name, model_path, config)
+                logger.info(f"Modèle trouvé: {name} -> {model_path}")
+            else:
+                logger.warning(f"Modèle non trouvé: {name} -> {model_path}")
         
-        return memory_info
+        return models
     
-    def check_gpu_health(self) -> Dict[str, Any]:
-        """🏥 Vérifie l'état de santé du GPU"""
+    async def initialize(self):
+        """Initialise le gestionnaire"""
+        # Précharger le modèle par défaut
+        if self.default_model.replace('.pth', '') in self.available_models:
+            model_name = self.default_model.replace('.pth', '')
+            await self.load_model(model_name)
+            logger.info(f"Modèle par défaut chargé: {model_name}")
+    
+    async def load_model(self, model_name: str) -> ModelInfo:
+        """Charge un modèle en mémoire"""
+        # Vérifier le cache
+        model_info = self.models_cache.get(model_name)
+        if model_info and model_info.is_loaded:
+            self.stats['cache_hits'] += 1
+            model_info.last_used = datetime.now()
+            logger.debug(f"Modèle {model_name} trouvé dans le cache")
+            return model_info
         
-        if not torch.cuda.is_available():
-            return {"available": False, "message": "CUDA non disponible"}
+        self.stats['cache_misses'] += 1
+        
+        # Charger le modèle
+        if model_name not in self.available_models:
+            raise ValueError(f"Modèle non disponible: {model_name}")
+        
+        model_info = self.available_models[model_name]
+        
+        logger.info(f"Chargement du modèle {model_name}...")
+        start_time = datetime.now()
         
         try:
-            gpu_props = torch.cuda.get_device_properties(0)
-            memory_stats = torch.cuda.memory_stats()
+            # Créer le modèle
+            model = SimpleDetectionModel(
+                num_classes=MODEL_CONFIG['num_classes'],
+                input_size=MODEL_CONFIG['image_size'][0]
+            )
             
-            return {
-                "available": True,
-                "device_name": gpu_props.name,
-                "compute_capability": f"{gpu_props.major}.{gpu_props.minor}",
-                "total_memory_gb": gpu_props.total_memory / (1024**3),
-                "memory_allocated_mb": memory_stats.get("allocated_bytes.all.current", 0) / (1024**2),
-                "memory_cached_mb": memory_stats.get("reserved_bytes.all.current", 0) / (1024**2),
-                "temperature": self._get_gpu_temperature()
-            }
+            # Charger les poids si le fichier existe
+            if model_info.path.exists():
+                try:
+                    checkpoint = torch.load(model_info.path, map_location=self.device)
+                    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                        model.load_state_dict(checkpoint['model_state_dict'])
+                    else:
+                        model.load_state_dict(checkpoint)
+                    logger.info(f"Poids chargés depuis {model_info.path}")
+                except Exception as e:
+                    logger.warning(f"Impossible de charger les poids: {e}. Utilisation d'un modèle aléatoire.")
+            else:
+                logger.warning(f"Fichier modèle non trouvé: {model_info.path}. Utilisation d'un modèle aléatoire.")
+            
+            # Déplacer sur le device et mettre en mode évaluation
+            model = model.to(self.device)
+            model.eval()
+            
+            # Créer le détecteur
+            detector = ObjectDetector(model, self.device)
+            
+            # Mettre à jour les informations
+            model_info.model = model
+            model_info.detector = detector
+            model_info.is_loaded = True
+            model_info.load_time = datetime.now()
+            model_info.last_used = datetime.now()
+            model_info.memory_usage = self._get_model_memory_usage(model)
+            
+            # Ajouter au cache
+            self.models_cache.put(model_name, model_info)
+            
+            load_duration = (datetime.now() - start_time).total_seconds()
+            self.stats['total_loads'] += 1
+            
+            logger.info(f"Modèle {model_name} chargé en {load_duration:.2f}s "
+                       f"(Mémoire: {model_info.memory_usage:.1f} MB)")
+            
+            return model_info
             
         except Exception as e:
-            return {"available": True, "error": str(e)}
+            logger.error(f"Erreur lors du chargement du modèle {model_name}: {e}")
+            raise
     
-    def _get_gpu_temperature(self) -> Optional[float]:
-        """🌡️ Récupère la température GPU (si possible)"""
-        try:
-            import pynvml
-            pynvml.nvmlInit()
-            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-            return float(temp)
-        except:
-            return None
-    
-    async def unload_model(self, model_name: str):
-        """🗑️ Décharge un modèle du cache"""
+    async def get_detector(self, model_name: Optional[str] = None) -> ObjectDetector:
+        """Récupère un détecteur pour un modèle"""
+        if model_name is None:
+            model_name = list(self.available_models.keys())[0]  # Premier modèle disponible
         
-        if model_name in self.model_cache.cache:
-            del self.model_cache.cache[model_name]
-            self.model_cache.access_times.pop(model_name, None)
-            self.model_cache.memory_usage.pop(model_name, None)
-            
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            
-            logger.info(f"🗑️ Modèle déchargé: {model_name}")
+        model_info = await self.load_model(model_name)
+        return model_info.detector
     
-    async def reload_model(self, model_name: str) -> nn.Module:
-        """🔄 Recharge un modèle"""
+    def _get_model_memory_usage(self, model: nn.Module) -> float:
+        """Calcule l'usage mémoire d'un modèle en MB"""
+        param_size = 0
+        buffer_size = 0
         
-        await self.unload_model(model_name)
-        return await self.get_model(model_name)
+        for param in model.parameters():
+            param_size += param.nelement() * param.element_size()
+        
+        for buffer in model.buffers():
+            buffer_size += buffer.nelement() * buffer.element_size()
+        
+        return (param_size + buffer_size) / 1024 / 1024  # Conversion en MB
     
-    def get_performance_stats(self) -> Dict[str, Any]:
-        """📊 Statistiques de performance"""
+    async def get_health_status(self) -> dict:
+        """Retourne l'état de santé du gestionnaire"""
+        memory = psutil.virtual_memory()
+        gpu_memory = {}
         
-        uptime = time.time() - self.start_time
+        if torch.cuda.is_available():
+            gpu_memory = {
+                'allocated': torch.cuda.memory_allocated() / 1e9,
+                'cached': torch.cuda.memory_reserved() / 1e9,
+                'total': torch.cuda.get_device_properties(0).total_memory / 1e9
+            }
+        
+        loaded_models = [name for name, info in self.models_cache.cache.items() 
+                        if info.is_loaded]
         
         return {
-            "uptime_seconds": uptime,
-            "models_loaded": len(self.model_cache.cache),
-            "cache_stats": self.model_cache.get_stats(),
-            "load_times": dict(self.load_times),
-            "inference_counts": dict(self.inference_counts),
-            "error_counts": dict(self.error_counts),
-            "memory_usage": self.get_memory_usage(),
-            "device_info": {
-                "device": str(self.device),
-                "cuda_available": torch.cuda.is_available(),
-                "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0
+            'timestamp': datetime.now(),
+            'models_loaded': loaded_models,
+            'gpu_available': torch.cuda.is_available(),
+            'memory_usage': {
+                'ram_percent': memory.percent,
+                'ram_available_gb': memory.available / 1e9,
+                'gpu': gpu_memory
+            },
+            'cache_stats': self.stats,
+            'device': str(self.device)
+        }
+    
+    async def get_stats(self) -> dict:
+        """Retourne les statistiques détaillées"""
+        models_stats = {}
+        
+        for name, info in self.available_models.items():
+            models_stats[name] = {
+                'is_loaded': info.is_loaded,
+                'memory_usage_mb': info.memory_usage,
+                'inference_count': info.inference_count,
+                'avg_inference_time': (info.total_inference_time / max(1, info.inference_count)),
+                'last_used': info.last_used.isoformat() if info.last_used else None,
+                'load_time': info.load_time.isoformat() if info.load_time else None
             }
+        
+        return {
+            'general_stats': self.stats,
+            'models_performance': models_stats,
+            'resource_usage': (await self.get_health_status())['memory_usage'],
+            'available_models': list(self.available_models.keys())
         }
     
     async def cleanup(self):
-        """🧹 Nettoyage des ressources"""
+        """Nettoie les ressources"""
+        logger.info("Nettoyage du ModelManager...")
         
-        logger.info("🧹 Nettoyage ModelManager...")
+        # Décharger tous les modèles
+        for model_info in self.models_cache.cache.values():
+            if model_info.is_loaded:
+                self.models_cache._unload_model(model_info)
         
-        # Vider le cache
-        self.model_cache.clear()
-        
-        # Nettoyage GPU
+        # Nettoyer la mémoire GPU
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
-        # Garbage collection
         gc.collect()
+        logger.info("Nettoyage terminé")
+    
+    def update_inference_stats(self, model_name: str, inference_time: float):
+        """Met à jour les statistiques d'inférence"""
+        if model_name in self.available_models:
+            info = self.available_models[model_name]
+            info.inference_count += 1
+            info.total_inference_time += inference_time
+            info.last_used = datetime.now()
         
-        logger.info("✅ ModelManager nettoyé")
-
-# === EXPORTS ===
-__all__ = [
-    "ModelManager",
-    "ModelCache", 
-    "ModelLoadError"
-]
+        self.stats['total_inferences'] += 1

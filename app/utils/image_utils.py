@@ -1,610 +1,163 @@
-"""
-🖼️ IMAGE UTILS - UTILITAIRES DE TRAITEMENT D'IMAGES
-==================================================
-Fonctions utilitaires pour manipulation et traitement d'images
-
-Fonctionnalités:
-- Validation et conversion de formats
-- Redimensionnement intelligent
-- Optimisations pour détection
-- Augmentation de données
-- Extraction de features
-- Comparaison d'images
-- Génération de thumbnails
-"""
-
-import logging
-from typing import Tuple, List, Optional, Union, Dict, Any
-import io
+# app/utils/image_utils.py - Version minimale sans torchvision
+import cv2
+import numpy as np
 import base64
-import hashlib
+import io
+from PIL import Image, ImageDraw, ImageFont
+from typing import Tuple, List, Optional, Union
+import torch
+# import torchvision.transforms as transforms  # Commenté temporairement
 from pathlib import Path
 
-import numpy as np
-import cv2
-from PIL import Image, ImageOps, ImageEnhance, ImageFilter, ImageDraw, ImageFont
-import torch
-import torch.nn.functional as F
-from torchvision import transforms
-
-logger = logging.getLogger(__name__)
-
-# === VALIDATION ET CONVERSION ===
-
-def validate_image_format(image_path: Union[str, Path]) -> bool:
-    """✅ Valide le format d'une image"""
+class ImageProcessor:
+    """Processeur d'images pour la détection - Version simplifiée"""
     
-    try:
-        valid_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp', '.gif'}
-        
-        if isinstance(image_path, str):
-            image_path = Path(image_path)
-        
-        # Vérification extension
-        if image_path.suffix.lower() not in valid_extensions:
-            return False
-        
-        # Tentative d'ouverture
-        with Image.open(image_path) as img:
-            img.verify()
-        
-        return True
-        
-    except Exception as e:
-        logger.debug(f"⚠️ Validation échouée pour {image_path}: {e}")
-        return False
-
-def convert_image_format(
-    image: Union[Image.Image, np.ndarray, torch.Tensor],
-    target_format: str = "RGB"
-) -> Image.Image:
-    """🔄 Convertit une image vers le format cible"""
+    def __init__(self, target_size: Tuple[int, int] = (320, 320)):
+        self.target_size = target_size
+        # Transforms simple sans torchvision
+        self.mean = [0.485, 0.456, 0.406]
+        self.std = [0.229, 0.224, 0.225]
     
-    if isinstance(image, Image.Image):
-        if image.mode != target_format:
-            return image.convert(target_format)
-        return image
-    
-    elif isinstance(image, np.ndarray):
-        # OpenCV BGR → RGB si nécessaire
+    def preprocess_image(self, image: np.ndarray) -> Tuple[torch.Tensor, dict]:
+        """
+        Prétraite une image pour l'inférence - Version simplifiée
+        """
+        original_shape = image.shape[:2]  # (H, W)
+        
+        # Conversion BGR -> RGB
         if len(image.shape) == 3 and image.shape[2] == 3:
-            if target_format == "RGB":
-                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            else:
-                image_rgb = image
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         else:
             image_rgb = image
         
-        # Normalisation des valeurs
-        if image_rgb.dtype != np.uint8:
-            if image_rgb.max() <= 1.0:
-                image_rgb = (image_rgb * 255).astype(np.uint8)
-            else:
-                image_rgb = image_rgb.astype(np.uint8)
+        # Redimensionnement simple
+        resized = cv2.resize(image_rgb, self.target_size, interpolation=cv2.INTER_LINEAR)
         
-        pil_image = Image.fromarray(image_rgb)
-        if pil_image.mode != target_format:
-            pil_image = pil_image.convert(target_format)
+        # Normalisation manuelle
+        resized = resized.astype(np.float32) / 255.0
         
-        return pil_image
+        # Normalisation avec mean/std
+        for i in range(3):
+            resized[:, :, i] = (resized[:, :, i] - self.mean[i]) / self.std[i]
+        
+        # Conversion en tensor
+        tensor = torch.from_numpy(resized).permute(2, 0, 1).unsqueeze(0)  # HWC -> BCHW
+        
+        # Métadonnées
+        info = {
+            'original_shape': original_shape,
+            'resized_shape': resized.shape[:2],
+            'scale_factors': (1.0, 1.0),  # Simplifié
+            'padding': (0, 0, 0, 0)
+        }
+        
+        return tensor, info
     
-    elif isinstance(image, torch.Tensor):
-        # Tensor → PIL
-        if image.dim() == 4:  # Batch
-            image = image.squeeze(0)
+    def postprocess_detections(self, detections: torch.Tensor, 
+                             transform_info: dict) -> np.ndarray:
+        """Post-traite les détections - Version simplifiée"""
+        if detections.numel() == 0:
+            return np.array([]).reshape(0, 6)
         
-        if image.dim() == 3:  # CHW → HWC
-            image = image.permute(1, 2, 0)
+        detections_np = detections.cpu().numpy()
         
-        # Dénormalisation
-        if image.dtype == torch.float32:
-            if image.min() < 0:  # Probablement normalisé
-                # Dénormalisation ImageNet standard
-                mean = torch.tensor([0.485, 0.456, 0.406])
-                std = torch.tensor([0.229, 0.224, 0.225])
-                image = image * std + mean
-            
-            image = torch.clamp(image, 0, 1)
-            image = (image * 255).byte()
+        # Mise à l'échelle simple vers l'image originale
+        original_shape = transform_info['original_shape']
+        h_scale = original_shape[0] / self.target_size[1]
+        w_scale = original_shape[1] / self.target_size[0]
         
-        numpy_image = image.cpu().numpy()
-        pil_image = Image.fromarray(numpy_image)
+        if detections_np.shape[1] >= 4:
+            detections_np[:, 0] *= w_scale  # x1
+            detections_np[:, 1] *= h_scale  # y1
+            detections_np[:, 2] *= w_scale  # x2
+            detections_np[:, 3] *= h_scale  # y2
         
-        if pil_image.mode != target_format:
-            pil_image = pil_image.convert(target_format)
-        
-        return pil_image
-    
-    else:
-        raise ValueError(f"Type d'image non supporté: {type(image)}")
+        return detections_np
 
-def normalize_image_size(image: Image.Image, max_size: int = 1920) -> Image.Image:
-    """📏 Normalise la taille d'une image"""
+def encode_image_to_base64(image: np.ndarray, format: str = 'JPEG', 
+                          quality: int = 80) -> str:
+    """Encode une image en base64"""
+    if format.upper() == 'JPEG':
+        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+        _, buffer = cv2.imencode('.jpg', image, encode_param)
+    elif format.upper() == 'PNG':
+        _, buffer = cv2.imencode('.png', image)
+    else:
+        raise ValueError(f"Format non supporté: {format}")
     
-    width, height = image.size
-    
-    if max(width, height) <= max_size:
+    return base64.b64encode(buffer).decode('utf-8')
+
+def decode_base64_to_image(base64_string: str) -> np.ndarray:
+    """Décode une image base64 en numpy array"""
+    try:
+        # Suppression du préfixe data:image si présent
+        if ',' in base64_string:
+            base64_string = base64_string.split(',')[1]
+        
+        # Décodage
+        image_data = base64.b64decode(base64_string)
+        nparr = np.frombuffer(image_data, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if image is None:
+            raise ValueError("Impossible de décoder l'image")
+        
         return image
-    
-    # Calcul du ratio de redimensionnement
-    if width > height:
-        new_width = max_size
-        new_height = int(height * max_size / width)
-    else:
-        new_height = max_size
-        new_width = int(width * max_size / height)
-    
-    return image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+    except Exception as e:
+        raise ValueError(f"Erreur décodage base64: {e}")
 
-# === REDIMENSIONNEMENT AVANCÉ ===
+def resize_image(image: np.ndarray, target_size: Tuple[int, int], 
+                keep_aspect_ratio: bool = True) -> np.ndarray:
+    """Redimensionne une image"""
+    if not keep_aspect_ratio:
+        return cv2.resize(image, target_size, interpolation=cv2.INTER_LINEAR)
+    
+    h, w = image.shape[:2]
+    target_w, target_h = target_size
+    
+    scale = min(target_w / w, target_h / h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    
+    resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    
+    # Centrer dans l'image cible
+    result = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    y_offset = (target_h - new_h) // 2
+    x_offset = (target_w - new_w) // 2
+    
+    result[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized
+    
+    return result
 
-def smart_resize(
-    image: Image.Image,
-    target_size: Tuple[int, int],
-    method: str = "letterbox",
-    background_color: Tuple[int, int, int] = (114, 114, 114)
-) -> Tuple[Image.Image, Dict[str, Any]]:
-    """🧠 Redimensionnement intelligent avec métadonnées"""
+def validate_image(image: np.ndarray) -> bool:
+    """Valide qu'une image est correcte"""
+    if image is None:
+        return False
     
-    original_size = image.size
-    target_width, target_height = target_size
+    if len(image.shape) not in [2, 3]:
+        return False
     
-    if method == "letterbox":
-        # Préservation du ratio avec padding
-        scale = min(target_width / original_size[0], target_height / original_size[1])
-        
-        new_width = int(original_size[0] * scale)
-        new_height = int(original_size[1] * scale)
-        
-        # Redimensionnement
-        resized = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-        
-        # Création de l'image avec padding
-        padded = Image.new('RGB', target_size, background_color)
-        
-        # Centrage
-        paste_x = (target_width - new_width) // 2
-        paste_y = (target_height - new_height) // 2
-        
-        padded.paste(resized, (paste_x, paste_y))
-        
-        metadata = {
-            "method": "letterbox",
-            "scale": scale,
-            "padding": (paste_x, paste_y),
-            "new_size": (new_width, new_height),
-            "original_size": original_size
-        }
-        
-        return padded, metadata
+    if len(image.shape) == 3 and image.shape[2] not in [3, 4]:
+        return False
     
-    elif method == "crop_center":
-        # Crop centré puis redimensionnement
-        crop_size = min(original_size)
-        
-        left = (original_size[0] - crop_size) // 2
-        top = (original_size[1] - crop_size) // 2
-        right = left + crop_size
-        bottom = top + crop_size
-        
-        cropped = image.crop((left, top, right, bottom))
-        resized = cropped.resize(target_size, Image.Resampling.LANCZOS)
-        
-        metadata = {
-            "method": "crop_center",
-            "crop_box": (left, top, right, bottom),
-            "scale": target_width / crop_size
-        }
-        
-        return resized, metadata
+    if image.size == 0:
+        return False
     
-    elif method == "stretch":
-        # Étirement direct
-        resized = image.resize(target_size, Image.Resampling.LANCZOS)
-        
-        metadata = {
-            "method": "stretch",
-            "scale_x": target_width / original_size[0],
-            "scale_y": target_height / original_size[1]
-        }
-        
-        return resized, metadata
-    
-    else:
-        raise ValueError(f"Méthode de redimensionnement inconnue: {method}")
+    return True
 
-def create_thumbnail(
-    image: Image.Image,
-    size: Tuple[int, int] = (256, 256),
-    quality: int = 85
-) -> bytes:
-    """🖼️ Crée une miniature optimisée"""
+def get_image_info(image: np.ndarray) -> dict:
+    """Retourne les informations d'une image"""
+    if not validate_image(image):
+        return {}
     
-    # Redimensionnement avec préservation du ratio
-    image.thumbnail(size, Image.Resampling.LANCZOS)
+    h, w = image.shape[:2]
+    channels = image.shape[2] if len(image.shape) == 3 else 1
     
-    # Conversion en JPEG optimisé
-    buffer = io.BytesIO()
-    
-    # Conversion en RGB si nécessaire
-    if image.mode in ['RGBA', 'LA']:
-        rgb_image = Image.new('RGB', image.size, (255, 255, 255))
-        rgb_image.paste(image, mask=image.split()[-1] if image.mode == 'RGBA' else None)
-        image = rgb_image
-    
-    image.save(buffer, format='JPEG', quality=quality, optimize=True)
-    
-    return buffer.getvalue()
-
-# === AMÉLIORATION D'IMAGES ===
-
-def enhance_image_quality(
-    image: Image.Image,
-    enhance_contrast: float = 1.1,
-    enhance_sharpness: float = 1.1,
-    enhance_color: float = 1.05,
-    auto_levels: bool = True
-) -> Image.Image:
-    """✨ Améliore la qualité d'une image"""
-    
-    enhanced = image.copy()
-    
-    # Auto-niveaux
-    if auto_levels:
-        enhanced = ImageOps.autocontrast(enhanced, cutoff=1)
-    
-    # Amélioration du contraste
-    if enhance_contrast != 1.0:
-        enhancer = ImageEnhance.Contrast(enhanced)
-        enhanced = enhancer.enhance(enhance_contrast)
-    
-    # Amélioration de la netteté
-    if enhance_sharpness != 1.0:
-        enhancer = ImageEnhance.Sharpness(enhanced)
-        enhanced = enhancer.enhance(enhance_sharpness)
-    
-    # Amélioration des couleurs
-    if enhance_color != 1.0 and enhanced.mode in ['RGB', 'RGBA']:
-        enhancer = ImageEnhance.Color(enhanced)
-        enhanced = enhancer.enhance(enhance_color)
-    
-    return enhanced
-
-def denoise_image(image: Image.Image, method: str = "gaussian") -> Image.Image:
-    """🔇 Suppression du bruit dans une image"""
-    
-    if method == "gaussian":
-        return image.filter(ImageFilter.GaussianBlur(radius=0.5))
-    
-    elif method == "median":
-        # Conversion temporaire en numpy pour filtre médian
-        np_image = np.array(image)
-        denoised = cv2.medianBlur(np_image, 3)
-        return Image.fromarray(denoised)
-    
-    elif method == "bilateral":
-        # Filtre bilatéral pour préserver les contours
-        np_image = np.array(image)
-        if len(np_image.shape) == 3:
-            denoised = cv2.bilateralFilter(np_image, 5, 75, 75)
-        else:
-            denoised = cv2.bilateralFilter(np_image, 5, 25, 25)
-        return Image.fromarray(denoised)
-    
-    else:
-        raise ValueError(f"Méthode de débruitage inconnue: {method}")
-
-# === ANALYSE D'IMAGES ===
-
-def calculate_image_hash(image: Image.Image, hash_type: str = "average") -> str:
-    """🔐 Calcule le hash d'une image pour comparaison"""
-    
-    # Redimensionnement en petite taille pour hash
-    small = image.resize((8, 8), Image.Resampling.LANCZOS).convert('L')
-    pixels = np.array(small).flatten()
-    
-    if hash_type == "average":
-        # Hash moyen
-        avg = pixels.mean()
-        hash_bits = ''.join('1' if pixel > avg else '0' for pixel in pixels)
-    
-    elif hash_type == "difference":
-        # Hash différentiel
-        diff = []
-        for i in range(len(pixels) - 1):
-            diff.append('1' if pixels[i] > pixels[i + 1] else '0')
-        hash_bits = ''.join(diff)
-    
-    else:
-        raise ValueError(f"Type de hash inconnu: {hash_type}")
-    
-    # Conversion en hexadécimal
-    hash_int = int(hash_bits, 2)
-    return format(hash_int, 'x')
-
-def compare_images_similarity(
-    image1: Image.Image,
-    image2: Image.Image,
-    method: str = "hash"
-) -> float:
-    """📊 Compare la similarité entre deux images"""
-    
-    if method == "hash":
-        # Comparaison par hash
-        hash1 = calculate_image_hash(image1)
-        hash2 = calculate_image_hash(image2)
-        
-        # Distance de Hamming
-        diff_bits = sum(c1 != c2 for c1, c2 in zip(hash1, hash2))
-        similarity = 1.0 - (diff_bits / len(hash1))
-        
-        return similarity
-    
-    elif method == "histogram":
-        # Comparaison par histogramme
-        hist1 = image1.histogram()
-        hist2 = image2.histogram()
-        
-        # Corrélation des histogrammes
-        correlation = cv2.compareHist(
-            np.array(hist1, dtype=np.float32),
-            np.array(hist2, dtype=np.float32),
-            cv2.HISTCMP_CORREL
-        )
-        
-        return max(0, correlation)
-    
-    elif method == "structural":
-        # SSIM (Structural Similarity Index)
-        from skimage.metrics import structural_similarity as ssim
-        
-        # Conversion en niveaux de gris
-        gray1 = np.array(image1.convert('L'))
-        gray2 = np.array(image2.convert('L'))
-        
-        # Redimensionnement à la même taille
-        if gray1.shape != gray2.shape:
-            gray2 = cv2.resize(gray2, (gray1.shape[1], gray1.shape[0]))
-        
-        similarity = ssim(gray1, gray2)
-        return max(0, similarity)
-    
-    else:
-        raise ValueError(f"Méthode de comparaison inconnue: {method}")
-
-def extract_dominant_colors(
-    image: Image.Image,
-    num_colors: int = 5
-) -> List[Tuple[int, int, int]]:
-    """🎨 Extrait les couleurs dominantes d'une image"""
-    
-    # Conversion en RGB si nécessaire
-    if image.mode != 'RGB':
-        image = image.convert('RGB')
-    
-    # Redimensionnement pour accélérer le traitement
-    small_image = image.resize((100, 100))
-    
-    # Conversion en array numpy
-    pixels = np.array(small_image).reshape(-1, 3)
-    
-    # Clustering K-means pour trouver les couleurs dominantes
-    from sklearn.cluster import KMeans
-    
-    kmeans = KMeans(n_clusters=num_colors, random_state=42, n_init=10)
-    kmeans.fit(pixels)
-    
-    # Couleurs dominantes
-    colors = kmeans.cluster_centers_.astype(int)
-    
-    return [tuple(color) for color in colors]
-
-# === ENCODAGE ET DÉCODAGE ===
-
-def image_to_base64(image: Image.Image, format: str = "JPEG", quality: int = 90) -> str:
-    """📄 Convertit une image en base64"""
-    
-    buffer = io.BytesIO()
-    
-    # Préparation selon le format
-    if format.upper() == "JPEG" and image.mode in ['RGBA', 'LA']:
-        # Conversion en RGB pour JPEG
-        rgb_image = Image.new('RGB', image.size, (255, 255, 255))
-        if image.mode == 'RGBA':
-            rgb_image.paste(image, mask=image.split()[-1])
-        else:
-            rgb_image.paste(image)
-        image = rgb_image
-    
-    # Sauvegarde
-    save_kwargs = {"format": format}
-    if format.upper() == "JPEG":
-        save_kwargs["quality"] = quality
-        save_kwargs["optimize"] = True
-    
-    image.save(buffer, **save_kwargs)
-    
-    # Encodage base64
-    encoded = base64.b64encode(buffer.getvalue()).decode('utf-8')
-    
-    return f"data:image/{format.lower()};base64,{encoded}"
-
-def base64_to_image(base64_string: str) -> Image.Image:
-    """📄 Convertit une string base64 en image"""
-    
-    # Suppression du préfixe data URL si présent
-    if base64_string.startswith('data:'):
-        base64_string = base64_string.split(',', 1)[1]
-    
-    # Décodage
-    image_bytes = base64.b64decode(base64_string)
-    
-    # Chargement de l'image
-    return Image.open(io.BytesIO(image_bytes))
-
-# === ANNOTATION D'IMAGES ===
-
-def draw_bounding_boxes(
-    image: Image.Image,
-    boxes: List[Dict[str, Any]],
-    font_size: int = 16
-) -> Image.Image:
-    """🖊️ Dessine des boîtes englobantes sur une image"""
-    
-    # Copie pour annotation
-    annotated = image.copy()
-    draw = ImageDraw.Draw(annotated)
-    
-    # Chargement de la police
-    try:
-        font = ImageFont.truetype("arial.ttf", font_size)
-    except:
-        font = ImageFont.load_default()
-    
-    # Couleurs par défaut
-    default_colors = [
-        (255, 0, 0),    # Rouge
-        (0, 255, 0),    # Vert
-        (0, 0, 255),    # Bleu
-        (255, 255, 0),  # Jaune
-        (255, 0, 255),  # Magenta
-        (0, 255, 255),  # Cyan
-    ]
-    
-    for i, box in enumerate(boxes):
-        # Extraction des coordonnées
-        x1 = box.get('x1', box.get('left', 0))
-        y1 = box.get('y1', box.get('top', 0))
-        x2 = box.get('x2', box.get('right', x1 + box.get('width', 50)))
-        y2 = box.get('y2', box.get('bottom', y1 + box.get('height', 50)))
-        
-        # Couleur
-        color = box.get('color', default_colors[i % len(default_colors)])
-        
-        # Rectangle
-        draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
-        
-        # Label si fourni
-        label = box.get('label', box.get('class_name', ''))
-        if label:
-            confidence = box.get('confidence', box.get('score', ''))
-            if confidence:
-                label = f"{label} ({confidence:.2f})" if isinstance(confidence, float) else f"{label} {confidence}"
-            
-            # Fond pour le texte
-            text_bbox = draw.textbbox((x1, y1 - 25), label, font=font)
-            draw.rectangle(text_bbox, fill=color)
-            
-            # Texte
-            draw.text((x1, y1 - 25), label, fill="white", font=font)
-    
-    return annotated
-
-def add_watermark(
-    image: Image.Image,
-    watermark_text: str = "AI Detection Service",
-    position: str = "bottom_right",
-    opacity: float = 0.7
-) -> Image.Image:
-    """💧 Ajoute un filigrane à une image"""
-    
-    # Création d'une couche transparente
-    overlay = Image.new('RGBA', image.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    
-    # Police pour le filigrane
-    try:
-        font = ImageFont.truetype("arial.ttf", max(20, image.width // 50))
-    except:
-        font = ImageFont.load_default()
-    
-    # Taille du texte
-    text_bbox = draw.textbbox((0, 0), watermark_text, font=font)
-    text_width = text_bbox[2] - text_bbox[0]
-    text_height = text_bbox[3] - text_bbox[1]
-    
-    # Position du filigrane
-    margin = 20
-    positions = {
-        "bottom_right": (image.width - text_width - margin, image.height - text_height - margin),
-        "bottom_left": (margin, image.height - text_height - margin),
-        "top_right": (image.width - text_width - margin, margin),
-        "top_left": (margin, margin),
-        "center": ((image.width - text_width) // 2, (image.height - text_height) // 2)
+    return {
+        'width': w,
+        'height': h,
+        'channels': channels,
+        'dtype': str(image.dtype),
+        'size_bytes': image.nbytes,
+        'aspect_ratio': w / h if h != 0 else 0
     }
-    
-    x, y = positions.get(position, positions["bottom_right"])
-    
-    # Dessin du filigrane
-    alpha = int(255 * opacity)
-    draw.text((x, y), watermark_text, fill=(255, 255, 255, alpha), font=font)
-    
-    # Fusion avec l'image originale
-    if image.mode != 'RGBA':
-        image = image.convert('RGBA')
-    
-    watermarked = Image.alpha_composite(image, overlay)
-    
-    # Retour au mode original si nécessaire
-    if image.mode != 'RGBA':
-        watermarked = watermarked.convert(image.mode)
-    
-    return watermarked
-
-# === UTILITAIRES DE VALIDATION ===
-
-def get_image_info(image: Union[Image.Image, str, Path]) -> Dict[str, Any]:
-    """📋 Récupère les informations détaillées d'une image"""
-    
-    if isinstance(image, (str, Path)):
-        image_path = Path(image)
-        image = Image.open(image_path)
-        file_size = image_path.stat().st_size
-    else:
-        image_path = None
-        file_size = None
-    
-    info = {
-        "size": image.size,
-        "mode": image.mode,
-        "format": image.format,
-        "width": image.width,
-        "height": image.height,
-        "aspect_ratio": image.width / image.height,
-        "file_size_bytes": file_size,
-        "has_transparency": image.mode in ['RGBA', 'LA'] or 'transparency' in image.info
-    }
-    
-    # Informations EXIF si disponibles
-    if hasattr(image, '_getexif') and image._getexif():
-        info["exif"] = dict(image._getexif())
-    
-    # Informations de couleur
-    if image.mode == 'RGB':
-        info["dominant_colors"] = extract_dominant_colors(image, num_colors=3)
-    
-    return info
-
-# === EXPORTS ===
-__all__ = [
-    # Validation et conversion
-    "validate_image_format", "convert_image_format", "normalize_image_size",
-    
-    # Redimensionnement
-    "smart_resize", "create_thumbnail",
-    
-    # Amélioration
-    "enhance_image_quality", "denoise_image",
-    
-    # Analyse
-    "calculate_image_hash", "compare_images_similarity", "extract_dominant_colors",
-    
-    # Encodage
-    "image_to_base64", "base64_to_image",
-    
-    # Annotation
-    "draw_bounding_boxes", "add_watermark",
-    
-    # Utilitaires
-    "get_image_info"
-]
