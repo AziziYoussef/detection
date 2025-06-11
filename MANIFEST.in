@@ -1,0 +1,212 @@
+# Lost Objects Detection Service - Package Manifest
+# Defines which files to include in the Python package distribution
+
+# Include README and documentation
+include README.md
+include LICENSE
+include CHANGELOG.md
+include .env.example
+
+# Include configuration files
+recursive-include config *.json *.yaml *.yml *.conf *.ini
+include config/deployment.json
+include config/logging.yaml
+include config/nginx.conf
+
+# Include Docker files
+include Dockerfile
+include docker-compose.yml
+include docker-compose.*.yml
+include .dockerignore
+
+# Include scripts
+recursive-include scripts *.py *.sh *.sql
+include scripts/deploy.py
+include scripts/test_service.py
+include scripts/cache_manager.py
+include scripts/init-db.sql
+
+# Include requirements
+include requirements.txt
+include requirements-dev.txt
+
+# Include application code
+recursive-include app *.py
+recursive-include app/api *.py
+recursive-include app/core *.py
+recursive-include app/models *.py
+recursive-include app/services *.py
+recursive-include app/utils *.py
+recursive-include app/config *.py
+recursive-include app/schemas *.py
+
+# Include test files
+recursive-include tests *.py
+include tests/conftest.py
+include tests/test_*.py
+
+# Include documentation
+recursive-include docs *.md *.rst *.txt
+include docs/API.md
+include docs/DEPLOYMENT.md
+
+# Include example configuration files
+include config/*.example
+include config/*.template
+
+# Include database migration files (if any)
+recursive-include migrations *.sql *.py
+
+# Include static files and templates (if any)
+recursive-include static *
+recursive-include templates *
+
+# Include sample data and fixtures (for testing)
+recursive-include tests/fixtures *.json *.yaml *.jpg *.png *.mp4
+
+# Include version file
+include app/VERSION
+include app/_version.py
+
+# Include package metadata
+include pyproject.toml
+include setup.cfg
+
+# Exclude development and build files
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude *.pyd
+global-exclude __pycache__
+global-exclude .git*
+global-exclude .DS_Store
+global-exclude *.so
+global-exclude .tox
+
+# Exclude sensitive files
+exclude .env
+exclude .env.local
+exclude .env.production
+exclude config/secrets.json
+exclude config/api_keys.json
+recursive-exclude config/ssl *
+
+# Exclude storage directories with actual data
+exclude storage/models/*.pth
+exclude storage/models/*.pt
+exclude storage/cache/*
+exclude storage/temp/*
+exclude logs/*
+
+# But include empty directories with .gitkeep
+include storage/models/.gitkeep
+include storage/cache/.gitkeep
+include storage/temp/.gitkeep
+include logs/.gitkeep
+
+# Exclude build artifacts
+exclude build/*
+exclude dist/*
+exclude *.egg-info/*
+exclude .coverage
+exclude htmlcov/*
+
+# Exclude IDE files
+exclude .vscode/*
+exclude .idea/*
+exclude *.swp
+exclude *.swo
+
+# Exclude OS files
+exclude Thumbs.db
+exclude .DS_Store
+
+# Exclude backup files
+exclude *~
+exclude *.bak
+exclude *.backup
+
+# Exclude test outputs
+exclude test_report.json
+exclude performance_report.json
+exclude benchmark_results.json
+
+# Include specific important files that might be missed
+include Makefile
+include tox.ini
+include pytest.ini
+include .gitignore
+include .flake8
+include .isort.cfg
+include pyproject.toml
+
+# Include version control files for reference
+include .gitignore
+include .gitattributes
+
+# Include CI/CD configuration
+include .github/workflows/*.yml
+include .github/workflows/*.yaml
+include .gitlab-ci.yml
+include .travis.yml
+include azure-pipelines.yml
+
+# Include deployment specific files
+include docker-compose.prod.yml
+include docker-compose.dev.yml
+include k8s/*.yaml
+include helm/*
+
+# Include monitoring configuration
+include config/prometheus.yml
+include config/grafana/*.json
+
+# Prune unnecessary files from included directories
+prune tests/__pycache__
+prune tests/.pytest_cache
+prune app/__pycache__
+prune scripts/__pycache__
+
+# Include localization files (if any)
+recursive-include app/locales *.po *.pot *.mo
+recursive-include app/translations *.json
+
+# Include API schemas and OpenAPI specs
+include openapi.json
+include openapi.yaml
+recursive-include schemas *.json *.yaml
+
+# Include sample configuration for different environments
+include config/development.json
+include config/staging.json
+include config/production.json.example
+
+# Include performance benchmarks and test data
+include benchmarks/*.py
+include benchmarks/*.json
+recursive-include test_data *.json *.csv
+
+# Include model configuration and metadata
+include app/models/model_configs.json
+include app/models/class_mappings.json
+
+# Include utility scripts
+include utils/*.py
+include tools/*.py
+
+# Include changelog and release notes
+include CHANGELOG.md
+include RELEASE_NOTES.md
+include HISTORY.md
+
+# Include contribution guidelines
+include CONTRIBUTING.md
+include CODE_OF_CONDUCT.md
+
+# Include security documentation
+include SECURITY.md
+include docs/SECURITY.md
+
+# Include legal documents
+include COPYRIGHT
+include NOTICE
+include THIRD_PARTY_LICENSES.md
